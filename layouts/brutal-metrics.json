@@ -1,5 +1,6 @@
 {
   "id": "root",
+  "preview": "layouts/brutal-metrics.png",
   "cloned_from": {
     "name": "main",
     "version": "0.1.12"
