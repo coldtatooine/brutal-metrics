@@ -35,10 +35,11 @@ Everything is Herdr's `main` layout except four places:
        - Last row, 2px rule above: the account strip, organization (10px) and email (11px black), or the credential kind (`API KEY`, `BEDROCK`...). One line per account when the space mixes accounts (`2 CONTAS`, `email xN`).
     2. **Agent cards**, 8px gap, scrolling. Each card: 2px `border`, `surface` fill, indented 12px per sub-agent depth.
        - **Left column**, 60px (46 for sub-agents), 2px rule on its right, with 2px left padding so the avatar sits 4px from the left edge and 2px from the right one. The avatar is centered on `chrome`; pinned to the bottom and centered is the terminal's code (`hc` address, e.g. `t1f`, 10px bold `muted`, 9px for sub-agents, the stamp color when blocked/waiting). Hover: `accent`, underlined; click runs `agent.focus {terminal}` and opens that agent's terminal, sub-agents included (one without a pane gets one).
-       - **Right side**: name in caps (12px, 11px for sub-agents, black; `accent` when focused), a status stamp, a 24-segment context bar (5px tall), a data line (11px) and, for active agents, a tool line (10.5px), then a `/CLEAR` button.
+       - **Right side**: name in caps (12px, 11px for sub-agents, black; `accent` when focused), a status stamp, a 24-segment context bar (5px tall), a data line (11px) and, for active agents, a tool line (10.5px), then a `/COMPACT` and a `/CLEAR` button, side by side, right-aligned (6px gap).
        - **Bar**: first segments `#7a8076` = base (the session's first-turn context: system prompt, tools, rules, skills, MCP), then `#b09270` = conversation, turning `#95553a` at 80% or more, rest `#1d1e19`.
        - **Data line**: `used/window` (bold, `blocked` color from 80%), `⚡cache%`, `~NT` turns until full (sand and bold at 10 or fewer, hidden when the context isn't growing, `99+` cap), time since last activity (`now`, `5m`, `2h`), and right-aligned the card's estimated cost, 15px black.
        - **Tool line**: `▸ Read main.js`, `▸ Bash npm test`: the last tool the agent called; shown only for working, blocked and waiting agents.
+       - **`/COMPACT`**: one click sends `/compact` to the agent with `hc send`. It keeps the conversation as a summary, so there is no confirmation.
        - **`/CLEAR`**: arms on the first click (`CONFIRM?`, 3s); a second click sends `/clear` to the agent with `hc send`.
        - **Account tag**: when the space has more than one account, a card whose account differs from the most common one gets a bordered `@ORG` tag left of the stamp.
 - Window: `titlebar: "none"`, terminal padding [14, 12], 1px `border` dividers, `canvas` background. Work column: tab bar, body (padding 8, gap 8; panes with the shipped `pane` header, 30px, 1px `border` frame, `accent` when focused, radius 10) and the shipped `workspace-status` bar (28px).
@@ -87,7 +88,7 @@ Status of a card (agent or sub-agent): `blocked` if Herdr reports blocked; `wait
 - Herdr functions: `spaces`, `agents`, `terminals`, `panes`, `exec`, `hc`, `appHome`, `home`, `window`, `theme`, `shared` / `setShared`. Commands: `agent.focus`, `layout.select`, `layout.show`, `layout.hide`.
 - Programs:
   - `python3` (through `wsl.exe` on Windows) for `collect.py`, which reads only Claude Code's files;
-  - `hc get` and `hc send` (`/CLEAR` sends `/clear`);
+  - `hc get` and `hc send` (`/COMPACT` sends `/compact`, `/CLEAR` sends `/clear`);
   - `git status` and a folder listing for the Files panel.
 - Files read: `~/.claude/...` and `.claude.json` as above, and the folder the Files panel shows. Files written: `~/.cache/herdr-metrics.json` only.
 - Its look is Herdr's, no theme or fonts of its own, except JetBrains Mono in the Metrics tab.

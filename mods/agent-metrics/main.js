@@ -281,6 +281,18 @@ export default class AgentMetrics extends View {
         .child(armed ? "CONFIRM?" : "/CLEAR");
     };
 
+    // /compact: summarizes the conversation in place, so nothing is lost and one click is enough.
+    const compactBtn = (r) => div().id(`cmp-${r.a.address}`).flex_none().px(6).h(18).flex().items_center()
+      .text_size(10.5).font_family(MONO).font_black().cursor_pointer()
+      .border(2).border_color(t.border).text_color(t.muted)
+      .hover((s) => s.border_color(t.foreground).text_color(t.foreground))
+      .tooltip("Run /compact in this agent")
+      .on_click((_e, cx) => {
+        cx.stop_propagation();
+        hc(["send", r.a.address, "/compact"]).catch((e) => { this.error = String(e?.message ?? e); cx.notify(); });
+      })
+      .child("/COMPACT");
+
     const row = (r) => {
       const c = color[r.state] ?? t.dim, hot = r.state === "blocked", s = r.s, ctx = s?.ctx ?? 0;
       const ink = hot ? c : t.foreground, win = windowOf(ctx), pct = s ? ctx / win : 0;
@@ -322,7 +334,7 @@ export default class AgentMetrics extends View {
               .child(div().flex_1())
               .child(div().text_size(15).font_black().text_color(t.foreground).child(money(r.usd)))))
           .when(Boolean(s?.tool) && active, (el) => el.child(div().truncate().text_size(10.5).font_family(MONO).text_color(hot ? c : t.dim).child(`▸ ${s.tool}`)))
-          .child(h_flex().justify_end().child(clearBtn(r))))
+          .child(h_flex().justify_end().gap(6).child(compactBtn(r)).child(clearBtn(r))))
         // Last child: drawn over the avatar column and the content, so all four edges show.
         .when(working, (el) => el.child(rainbowEdge(this.tick)));
     };

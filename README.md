@@ -21,7 +21,7 @@ full its context window is.
   - the context size against the window size, the cache hit rate, an
     estimate of turns left, and the time since the last turn;
   - the tool the agent is running;
-  - a two-click `/CLEAR` button.
+  - a `/COMPACT` button (one click) and a two-click `/CLEAR` button.
 - **Alerts**: when an agent needs you, the panel turns rust and shows a
   blinking `NEEDS YOU`. A parent waiting on its sub-agents shows `WAITING`.
 - **Pixel-art avatars**: each agent gets a random sprite, the same in the
@@ -80,7 +80,7 @@ Your own layout stays as it is. Press `ctrl-shift-l` to switch back.
 
   It keeps read offsets in `~/.cache/herdr-metrics.json`. It makes no
   network requests.
-- The mods run `hc get` and `hc send` (`/CLEAR` sends `/clear` to the
+- The mods run `hc get` and `hc send` (`/COMPACT` and `/CLEAR` send `/compact` and `/clear` to the
   agent). They also run `git status` and a folder listing for the Files
   panel.
 
