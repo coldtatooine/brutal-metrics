@@ -8,11 +8,16 @@ full its context window is.
 
 ## Features
 
-- **Cost panel**: the estimated total cost of the space, its agent and token
-  counts, and the account each session runs as.
+- **Summary box** at the top of the panel, in compact cells (value over label):
+  - the estimated total cost of the space, and the account each session
+    runs as;
+  - `AGENTS`, `TOKENS` and `CACHE` (cache reads as a share of all input
+    tokens), all summed over the space;
+  - `CTX MAX`, the fullest context window among the agents (tinted from 80%);
+  - `PLUGINS`, `MCP` and `HOOKS`, the configured items across the agents.
 - **One card per agent**, with sub-agents nested under it:
-  - a 24-segment context bar split into base (system prompt, tools, MCP),
-    conversation and free space;
+  - a thin 24-segment context bar split into base (system prompt, tools,
+    MCP), conversation and free space;
   - the context size against the window size, the cache hit rate, an
     estimate of turns left, and the time since the last turn;
   - the tool the agent is running;
@@ -44,6 +49,16 @@ To install it by hand:
 
 Your own layout stays as it is. Press `ctrl-shift-l` to switch back.
 
+## What the numbers mean
+
+- Cost, `TOKENS` and `CACHE` are cumulative for the whole session, not for
+  the last turn.
+- `CTX MAX` is the context size at the last turn.
+- `PLUGINS`, `MCP` and `HOOKS` count what is configured, not what is
+  connected. They are read from the settings files, `.claude.json`,
+  `.mcp.json` and the enabled plugins. claude.ai cloud connectors are not
+  counted.
+
 ## Requirements
 
 - **Python 3**: the metrics come from `mods/agent-metrics/collect.py`.
@@ -57,6 +72,9 @@ Your own layout stays as it is. Press `ctrl-shift-l` to switch back.
 
 - `collect.py` only reads Claude Code's files:
   - `~/.claude/sessions/*.json` and the session transcripts;
+  - `settings.json`, `settings.local.json`, `.mcp.json` and the enabled
+    plugins' `hooks/hooks.json` and `.mcp.json`, to count plugins, MCP
+    servers and hooks;
   - `~/.claude.json` or settings `env`, for the account (email, org or
     credential kind, never a token).
 
