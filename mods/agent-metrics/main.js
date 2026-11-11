@@ -138,15 +138,16 @@ export default class AgentMetrics extends View {
   }
 
   // Brutalist summary: big mono numbers, thick borders, solid blocks. Turns red and blinks when someone is needed.
-  hero(t, { space, rows, totalUsd, totalTok, needs, waiting, accounts }) {
+  hero(t, { space, rows, totalUsd, totalTok, cachePct, ctxPct, cfg, needs, waiting, accounts }) {
     const MONO = "JetBrains Mono";
     const hot = needs > 0;
     // Palette grays from the reference still; rust (#95553a) when someone is needed.
     const bg = hot ? "#95553a" : "#7a8076", fg = "#0a1312", edge = hot ? "#b09270" : "#95a7a7";
-    const cell = (label, value, last) => v_flex().flex_1().min_w(0).px(10).py(6).gap(1)
+    // Compact stat cell: value over label, centered, thin rule on the right. `warn` tints the value.
+    const cell = (value, label, last, warn) => v_flex().flex_1().min_w(0).px(4).py(4).items_center()
       .when(!last, (el) => el.border_r(2).border_color(fg))
-      .child(div().text_size(10).font_family(MONO).font_bold().text_color(fg).child(label))
-      .child(div().text_size(20).font_family(MONO).font_black().text_color(fg).truncate().child(value));
+      .child(div().text_size(15).font_family(MONO).font_black().text_color(warn ? "#522d1b" : fg).truncate().child(value))
+      .child(div().text_size(9).font_family(MONO).font_bold().text_color(fg).child(label));
     return div().flex_none().p(8).child(v_flex().w_full().border(3).border_color(edge).bg(bg)
       .child(h_flex().px(10).pt(6).items_center().gap(8)
         .child(div().flex_1().min_w(0).truncate().text_size(11).font_family(MONO).font_black().text_color(fg).child(`${(space?.name ?? "").toUpperCase()} / COST`))
@@ -154,9 +155,14 @@ export default class AgentMetrics extends View {
         .when(!hot && waiting > 0, (el) => el.child(div().px(6).border(2).border_color(fg).text_size(11).font_family(MONO).font_black().text_color(fg).loop("opacity", { from: 0.4, to: 1, period: 1500 }).child(`${waiting} WAITING`))))
       .child(div().px(10).text_size(42).font_family(MONO).font_black().text_color(fg).truncate().child(money(totalUsd)))
       .child(h_flex().border_t(2).border_color(fg)
-        .child(cell("AGENTS", String(rows.length)))
-        .child(cell("TOKENS", fmt(totalTok)))
-        .child(cell("EST.", this.error ? "ERR" : "USD", true)))
+        .child(cell(String(rows.length), "AGENTS"))
+        .child(cell(fmt(totalTok), "TOKENS"))
+        .child(cell(`${cachePct}%`, "CACHE"))
+        .child(cell(`${Math.round(ctxPct * 100)}%`, "CTX MAX", true, ctxPct >= HIGH)))
+      .child(h_flex().border_t(2).border_color(fg)
+        .child(cell(String(cfg.plugins), "PLUGINS"))
+        .child(cell(String(cfg.mcp), "MCP"))
+        .child(cell(String(cfg.hooks), "HOOKS", true)))
       .child(h_flex().border_t(2).border_color(fg).px(10).py(5).gap(8).items_start()
         .child(div().flex_none().text_size(10).font_family(MONO).font_bold().text_color(fg).child(accounts.length > 1 ? `${accounts.length} CONTAS` : (accounts[0]?.org ?? "CONTA").toUpperCase()))
         .child(v_flex().flex_1().min_w(0)
@@ -203,6 +209,13 @@ export default class AgentMetrics extends View {
     this.anim = rows.some((r) => animated(r.state));
     const totalUsd = rows.reduce((x, r) => x + r.usd, 0);
     const totalTok = rows.reduce((x, r) => x + (r.s ? r.s.in + r.s.out + r.s.cache_write : 0), 0);
+    // Space-wide cache hit (same formula as a card) and the fullest context among its agents.
+    const cs = rows.filter((r) => r.s);
+    const cachePct = Math.round((cs.reduce((x, r) => x + r.s.cache_read, 0) / Math.max(1, cs.reduce((x, r) => x + r.s.in + r.s.cache_read + r.s.cache_write, 0))) * 100);
+    const ctxPct = cs.reduce((x, r) => Math.max(x, r.s.ctx / windowOf(r.s.ctx)), 0);
+    // What the space's folders have configured: the union over its agents, so a shared user setting counts once.
+    const union = (k) => new Set(cs.flatMap((r) => r.s.config?.[k] ?? [])).size;
+    const cfg = { plugins: union("plugins"), mcp: union("mcp"), hooks: union("hooks") };
     const needs = rows.filter((r) => r.state === "blocked").length;
     const waiting = rows.filter((r) => r.state === "waiting").length;
 
@@ -316,7 +329,7 @@ export default class AgentMetrics extends View {
 
     return v_flex().id("metrics-root").size_full().bg(t.chrome).overflow_hidden()
       .on_size_change((size, cx) => { if (Math.abs(size.width - this.width) > 1) { this.width = size.width; cx.notify(); } })
-      .child(this.hero(t, { space, rows, totalUsd, totalTok, needs, waiting, accounts }))
+      .child(this.hero(t, { space, rows, totalUsd, totalTok, cachePct, ctxPct, cfg, needs, waiting, accounts }))
       .child(v_flex().id("metrics-list").flex_1().min_h(0).px(8).pb(8).gap(8).overflow_y_scrollbar()
         .when(rows.length === 0, (el) => el.child(div().p(8).text_size(12).text_color(t.dim).child("No agents in this space")))
         .children(rows.map(row)));

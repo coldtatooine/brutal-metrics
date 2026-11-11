@@ -168,6 +168,74 @@ def settings_env(path):
         return {}
 
 
+_json_memo = {}
+
+
+def read_json(path):
+    # One parse per file per run: ~/.claude.json is large and every session reads it.
+    if path not in _json_memo:
+        try:
+            with open(path, encoding="utf-8") as f:
+                o = json.load(f)
+            _json_memo[path] = o if isinstance(o, dict) else {}
+        except Exception:
+            _json_memo[path] = {}
+    return _json_memo[path]
+
+
+def mcp_names(d):
+    # A plugin's .mcp.json is either {"mcpServers": {...}} or the server map itself.
+    m = d.get("mcpServers", d)
+    return [k for k, v in m.items() if isinstance(v, dict)] if isinstance(m, dict) else []
+
+
+def hook_keys(src, hooks):
+    # settings and plugin hooks: {event: [{"matcher": ..., "hooks": [{"type": ..., "command": ...}]}]}; one key per handler.
+    out = []
+    if isinstance(hooks, dict):
+        for ev, groups in hooks.items():
+            for i, g in enumerate(groups if isinstance(groups, list) else []):
+                for j, _ in enumerate(g.get("hooks", []) if isinstance(g, dict) else []):
+                    out.append(f"{src}|{ev}|{i}|{j}")
+    return out
+
+
+def config_of(native, root, cwd):
+    """What the session's folder has configured: MCP servers, hook handlers, enabled plugins.
+
+    Read from files only, so it is what is configured, not what is connected (claude.ai connectors
+    live in the cloud and are not counted). Plugin MCP servers and hooks are read from their install
+    folder, which only works for a native root (installPath is an OS path of the same machine)."""
+    cwd_p = posix_path(cwd)
+    home_root = os.path.dirname(root.rstrip("/"))
+    settings = [os.path.join(root, "settings.json"), os.path.join(root, "settings.local.json")] + \
+               [os.path.join(cwd_p, ".claude", n) for n in ("settings.json", "settings.local.json")]
+    plugins, hooks = {}, []
+    for sp in settings:
+        d = read_json(sp)
+        for k, v in (d.get("enabledPlugins") or {}).items():
+            plugins[k] = bool(v)  # later files override earlier ones
+        hooks += hook_keys(sp, d.get("hooks"))
+    on = sorted(k for k, v in plugins.items() if v)
+    mcp = set()
+    cj = read_json(os.path.join(home_root, ".claude.json"))
+    mcp.update((cj.get("mcpServers") or {}).keys())
+    proj = (cj.get("projects") or {}).get(cwd_p) or {}
+    mcp.update((proj.get("mcpServers") or {}).keys())
+    mcp.update(mcp_names(read_json(os.path.join(cwd_p, ".mcp.json"))))
+    if native:
+        inst = (read_json(os.path.join(root, "plugins", "installed_plugins.json")).get("plugins")) or {}
+        for name in on:
+            entries = inst.get(name) or []
+            path = (next((e for e in entries if e.get("scope") == "user"), entries[0] if entries else None) or {}).get("installPath")
+            if not path:
+                continue
+            mcp.update(f"{name.split('@')[0]}:{m}" for m in mcp_names(read_json(os.path.join(path, ".mcp.json"))))
+            hooks += hook_keys(name, (read_json(os.path.join(path, "hooks", "hooks.json"))).get("hooks"))
+    mcp -= set(proj.get("disabledMcpServers") or [])
+    return {"mcp": sorted(mcp), "hooks": sorted(set(hooks)), "plugins": on}
+
+
 def account_of(native, root, pid, cwd):
     env = (proc_env(pid) if native else None) or {}
     cfg_dir = env.get("CLAUDE_CONFIG_DIR") if native else None
@@ -229,7 +297,7 @@ def main():
                     "mtime": mtime, "in": st["in"], "out": st["out"], "cache_read": st["cr"],
                     "cache_write": st["cw"], "turns": st["turns"], "tools": st["tools"],
                     "model": st["model"], "ctx": st["ctx"], "base": st["base"], "hist": st["hist"], "tool": st["tool"], "by_model": st["cost_by_model"],
-                    "title": st.get("custom") or st.get("title")})
+                    "title": st.get("custom") or st.get("title"), "config": config_of(native, root, cwd)})
     # forget sessions that are gone
     live = {o["session"] for o in out}
     for k in list(cache):
