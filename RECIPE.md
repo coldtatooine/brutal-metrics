@@ -27,7 +27,7 @@ Everything is Herdr's `main` layout except four places:
   - **Files tab**: Herdr's file browser, rooted at the agent's project folder (see How it behaves).
   - **Metrics tab**, top to bottom, background `chrome`, JetBrains Mono (shipped with Herdr), bold and black weights, uppercase:
     1. **Summary block**, 8px margin, 3px border `#95a7a7`, fill `#7a8076`, all text `#0a1312`.
-       - Row 1: `<SPACE NAME> / COST` (11px black) and, right, a chip.
+       - Row 1 (only when needed): a chip on the right (`N NEEDS YOU`, blinking, or `N WAITING`). There is no title: the selected tab already says what the numbers are.
        - Tabs row: two equal tabs, `LAST TURN` (default) and `TOTAL COST` (10px black, 18px tall, 2px border; the active one is filled with the ink color). Clicking sets the view for the whole panel; it is kept in memory only.
        - Row 2: estimated cost, summed over the space's agents, 42px black (last turn or session total, by tab) (`$40.1`).
        - Rows 3 and 4, each a row of compact cells separated by 2px rules, value over label, both centered (15px black value, 9px label):

@@ -156,11 +156,11 @@ export default class AgentMetrics extends View {
       .child(div().text_size(15).font_family(MONO).font_black().text_color(warn ? "#522d1b" : fg).truncate().child(value))
       .child(div().text_size(9).font_family(MONO).font_bold().text_color(fg).child(label));
     return div().flex_none().p(8).child(v_flex().w_full().border(3).border_color(edge).bg(bg)
-      .child(h_flex().px(10).pt(6).items_center().gap(8)
-        .child(div().flex_1().min_w(0).truncate().text_size(11).font_family(MONO).font_black().text_color(fg).child(`${(space?.name ?? "").toUpperCase()} / COST`))
+      .when(hot || waiting > 0, (el) => el.child(h_flex().px(10).pt(6).items_center().gap(8)
+        .child(div().flex_1())
         .when(hot, (el) => el.child(div().px(6).bg(fg).text_size(11).font_family(MONO).font_black().text_color(bg).loop("opacity", { from: 0.25, to: 1, period: 650 }).child(`${needs} NEEDS YOU`)))
-        .when(!hot && waiting > 0, (el) => el.child(div().px(6).border(2).border_color(fg).text_size(11).font_family(MONO).font_black().text_color(fg).loop("opacity", { from: 0.4, to: 1, period: 1500 }).child(`${waiting} WAITING`))))
-      .child(h_flex().px(10).pb(2).gap(6)
+        .when(!hot && waiting > 0, (el) => el.child(div().px(6).border(2).border_color(fg).text_size(11).font_family(MONO).font_black().text_color(fg).loop("opacity", { from: 0.4, to: 1, period: 1500 }).child(`${waiting} WAITING`)))))
+      .child(h_flex().px(10).pt(6).pb(2).gap(6)
         .children([["turn", "LAST TURN"], ["total", "TOTAL COST"]].map(([k, label]) => {
           const on = this.view === k;
           return div().id(`view-${k}`).flex_1().h(18).flex().items_center().justify_center().cursor_pointer()
