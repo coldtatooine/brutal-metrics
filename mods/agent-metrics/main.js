@@ -244,7 +244,7 @@ export default class AgentMetrics extends View {
       const nBase = base > 0 ? Math.max(1, Math.round((base / win) * SEGS)) : 0;
       const nUsed = Math.min(SEGS, Math.max(nBase, Math.round((ctx / win) * SEGS)));
       const conv = ctx / win >= HIGH ? HIGH_C : CONV_C;
-      return h_flex().h(10).w_full().gap(2).children(Array.from({ length: SEGS }, (_, i) =>
+      return h_flex().h(5).w_full().gap(2).children(Array.from({ length: SEGS }, (_, i) =>
         div().flex_1().h_full().bg(i < nBase ? BASE_C : i < nUsed ? conv : FREE_C)));
     };
     // ~N turns until the window is full, from the average growth of the last turns (null when not growing).
@@ -308,10 +308,10 @@ export default class AgentMetrics extends View {
             .child(r.a.address)))
         .child(v_flex().flex_1().min_w(0).p(8).gap(6)
           .child(h_flex().gap(8).items_center()
-            .child(div().flex_1().min_w(0).truncate().text_size(r.a.depth > 0 ? 13 : 15).font_family(MONO).font_black().text_color(r.a.focused ? t.accent : ink).child(r.name.toUpperCase()))
+            .child(div().flex_1().min_w(0).truncate().text_size(r.a.depth > 0 ? 11 : 12).font_family(MONO).font_black().text_color(r.a.focused ? t.accent : ink).child(r.name.toUpperCase()))
             .when(accounts.length > 1 && acctKey(s?.account) !== mainAcct, (el) => el.child(div().flex_none().px(4).h(18).flex().items_center().border(2).border_color(t.foreground).text_size(10).font_family(MONO).font_black().text_color(t.foreground).child(`@${(acctName(s?.account) ?? "?").split("@").pop().split(".")[0].toUpperCase()}`)))
             .child(stamp(r)))
-          .child(s ? bar(r) : div().h(10).border(2).border_color(t.border))
+          .child(s ? bar(r) : div().h(5).border(2).border_color(t.border))
           .child(h_flex().gap(8).items_baseline().text_size(11).font_family(MONO).text_color(t.muted)
             .when(!s, (el) => el.child(div().font_bold().text_color(ink).child("NO DATA")))
             .when(Boolean(s), (el) => el
