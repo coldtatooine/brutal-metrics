@@ -15,14 +15,16 @@ const FX = 10, FY = 2, EDGE = 2;
 function rainbowEdge(tick) {
   const n = 2 * (FX + FY);
   const at = p => { const i = (((p - tick) % n) + n) % n, b = RAINBOW[i % RAINBOW.length]; return i % 2 ? shade(b, 0.72) : b; };
-  const seg = p => div().flex_1().bg(at(p));
-  const run_ = (count, pos) => Array.from({ length: count }, (_, i) => seg(pos(i)));
+  // Facets need an explicit cross size: a row centers its children instead of stretching them, so a facet
+  // with only flex_1 is 0px tall and the top and bottom edges vanish.
+  const hrun = (count, pos) => Array.from({ length: count }, (_, i) => div().flex_1().h_full().bg(at(pos(i))));
+  const vrun = (count, pos) => Array.from({ length: count }, (_, i) => div().flex_1().w_full().bg(at(pos(i))));
   // One absolute strip per edge, so all four always draw: top and bottom run the width, left and right the height.
   return div().absolute().inset_0().rounded(8).overflow_hidden()
-    .child(v_flex().absolute().inset_0().child(h_flex().w_full().h(EDGE).children(run_(FX, i => i))))
-    .child(h_flex().absolute().inset_0().justify_end().child(v_flex().h_full().w(EDGE).children(run_(FY, i => FX + i))))
-    .child(v_flex().absolute().inset_0().justify_end().child(h_flex().w_full().h(EDGE).children(run_(FX, i => FX + FY + (FX - 1 - i)))))
-    .child(h_flex().absolute().inset_0().child(v_flex().h_full().w(EDGE).children(run_(FY, i => 2 * FX + FY + (FY - 1 - i)))));
+    .child(v_flex().absolute().inset_0().child(h_flex().w_full().h(EDGE).children(hrun(FX, i => i))))
+    .child(h_flex().absolute().inset_0().justify_end().child(v_flex().h_full().w(EDGE).children(vrun(FY, i => FX + i))))
+    .child(v_flex().absolute().inset_0().justify_end().child(h_flex().w_full().h(EDGE).children(hrun(FX, i => FX + FY + (FX - 1 - i)))))
+    .child(h_flex().absolute().inset_0().child(v_flex().h_full().w(EDGE).children(vrun(FY, i => 2 * FX + FY + (FY - 1 - i)))));
 }
 
 function find(node, id) {

@@ -49,13 +49,16 @@ const FX = 14, FY = 5, EDGE = 3;
 function rainbowEdge(tick) {
   const n = 2 * (FX + FY);
   const at = (p) => { const i = (((p - tick) % n) + n) % n, b = RAINBOW[i % RAINBOW.length]; return i % 2 ? shade(b, 0.72) : b; };
-  const segs = (count, pos) => Array.from({ length: count }, (_, i) => div().flex_1().bg(at(pos(i))));
+  // Facets need an explicit cross size: a row centers its children instead of stretching them, so a facet
+  // with only flex_1 is 0px tall and the top and bottom edges vanish.
+  const hsegs = (count, pos) => Array.from({ length: count }, (_, i) => div().flex_1().h_full().bg(at(pos(i))));
+  const vsegs = (count, pos) => Array.from({ length: count }, (_, i) => div().flex_1().w_full().bg(at(pos(i))));
   // One absolute strip per edge, so all four always draw: top and bottom run the width, left and right the height.
   return div().absolute().inset_0().overflow_hidden()
-    .child(v_flex().absolute().inset_0().child(h_flex().w_full().h(EDGE).children(segs(FX, (i) => i))))
-    .child(h_flex().absolute().inset_0().justify_end().child(v_flex().h_full().w(EDGE).children(segs(FY, (i) => FX + i))))
-    .child(v_flex().absolute().inset_0().justify_end().child(h_flex().w_full().h(EDGE).children(segs(FX, (i) => FX + FY + (FX - 1 - i)))))
-    .child(h_flex().absolute().inset_0().child(v_flex().h_full().w(EDGE).children(segs(FY, (i) => 2 * FX + FY + (FY - 1 - i)))));
+    .child(v_flex().absolute().inset_0().child(h_flex().w_full().h(EDGE).children(hsegs(FX, (i) => i))))
+    .child(h_flex().absolute().inset_0().justify_end().child(v_flex().h_full().w(EDGE).children(vsegs(FY, (i) => FX + i))))
+    .child(v_flex().absolute().inset_0().justify_end().child(h_flex().w_full().h(EDGE).children(hsegs(FX, (i) => FX + FY + (FX - 1 - i)))))
+    .child(h_flex().absolute().inset_0().child(v_flex().h_full().w(EDGE).children(vsegs(FY, (i) => 2 * FX + FY + (FY - 1 - i)))));
 }
 
 export default class AgentMetrics extends View {
