@@ -75,6 +75,7 @@ export default class AgentMetrics extends View {
     this.width = 300;
     this.busy = false;
     this.tick = 0; this.anim = false;
+    this.view = "turn"; // "turn" = last turn, "total" = whole session
     // Avatars step through their poses only while some agent is active (each tick redraws the window).
     cx.timer.every(200, (cx) => { if (this.anim) { this.tick++; cx.notify(); } });
     cx.timer.every(REFRESH_MS, (cx) => this.refresh(cx));
@@ -156,9 +157,19 @@ export default class AgentMetrics extends View {
       .child(div().text_size(9).font_family(MONO).font_bold().text_color(fg).child(label));
     return div().flex_none().p(8).child(v_flex().w_full().border(3).border_color(edge).bg(bg)
       .child(h_flex().px(10).pt(6).items_center().gap(8)
-        .child(div().flex_1().min_w(0).truncate().text_size(11).font_family(MONO).font_black().text_color(fg).child(`${(space?.name ?? "").toUpperCase()} / LAST TURN`))
+        .child(div().flex_1().min_w(0).truncate().text_size(11).font_family(MONO).font_black().text_color(fg).child(`${(space?.name ?? "").toUpperCase()} / COST`))
         .when(hot, (el) => el.child(div().px(6).bg(fg).text_size(11).font_family(MONO).font_black().text_color(bg).loop("opacity", { from: 0.25, to: 1, period: 650 }).child(`${needs} NEEDS YOU`)))
         .when(!hot && waiting > 0, (el) => el.child(div().px(6).border(2).border_color(fg).text_size(11).font_family(MONO).font_black().text_color(fg).loop("opacity", { from: 0.4, to: 1, period: 1500 }).child(`${waiting} WAITING`))))
+      .child(h_flex().px(10).pb(2).gap(6)
+        .children([["turn", "LAST TURN"], ["total", "TOTAL COST"]].map(([k, label]) => {
+          const on = this.view === k;
+          return div().id(`view-${k}`).flex_1().h(18).flex().items_center().justify_center().cursor_pointer()
+            .text_size(10).font_family(MONO).font_black().border(2).border_color(fg)
+            .bg(on ? fg : "#00000000").text_color(on ? bg : fg)
+            .tooltip(k === "turn" ? "Cost, tokens and cache since the last prompt" : "Cost, tokens and cache of the whole session")
+            .on_click((_e, cx) => { cx.stop_propagation(); this.view = k; cx.notify(); })
+            .child(label);
+        })))
       .child(div().px(10).text_size(42).font_family(MONO).font_black().text_color(fg).truncate().child(money(totalUsd)))
       .child(h_flex().border_t(2).border_color(fg)
         .child(cell(String(rows.length), "AGENTS"))
@@ -199,7 +210,7 @@ export default class AgentMetrics extends View {
       const kids = all.filter((x) => x.parent === a.address && x.state === "live" && (x.status === "working" || x.status === "blocked"));
       const state = a.status === "blocked" ? "blocked" : kids.length > 0 ? "waiting" : a.status;
       const s = sess[a.address];
-      const u = turnOf(s);
+      const u = this.view === "total" ? s : turnOf(s);
       const usd = u ? cost(u.by_model) : 0;
       return { a, name: a.name, kids, state, s, u, usd };
     });
