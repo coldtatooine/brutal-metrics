@@ -46,7 +46,8 @@ def transcript_path(root, cwd, sid):
 def zero():
     return {"off": 0, "in": 0, "out": 0, "cr": 0, "cw": 0, "turns": 0, "tools": 0,
             "model": None, "ctx": 0, "last_id": None, "last": None, "cost_by_model": {},
-            "base": 0, "hist": [], "tool": None, "title": None, "custom": None, "v": 3}
+            "base": 0, "hist": [], "tool": None, "title": None, "custom": None,
+            "turn": {"in": 0, "out": 0, "cr": 0, "cw": 0, "by": {}}, "v": 4}
 
 
 def add(st, u, model, sign):
@@ -55,6 +56,21 @@ def add(st, u, model, sign):
     st["in"] += sign * i; st["out"] += sign * o; st["cr"] += sign * cr; st["cw"] += sign * cw
     m = st["cost_by_model"].setdefault(model or "?", [0, 0, 0, 0])
     m[0] += sign * i; m[1] += sign * o; m[2] += sign * cr; m[3] += sign * cw
+    # the current turn: everything since the person's last prompt
+    t = st["turn"]
+    t["in"] += sign * i; t["out"] += sign * o; t["cr"] += sign * cr; t["cw"] += sign * cw
+    m = t["by"].setdefault(model or "?", [0, 0, 0, 0])
+    m[0] += sign * i; m[1] += sign * o; m[2] += sign * cr; m[3] += sign * cw
+
+
+def is_prompt(d):
+    """A line the person typed (not a tool result, a meta line, a compact summary or command output)."""
+    if d.get("type") != "user" or d.get("isMeta") or d.get("isSidechain") or d.get("isCompactSummary"):
+        return False
+    c = (d.get("message") or {}).get("content")
+    if isinstance(c, str):
+        return not c.startswith("<local-command-")
+    return isinstance(c, list) and any(isinstance(x, dict) and x.get("type") in ("text", "image") for x in c)
 
 
 def tool_label(c):
@@ -71,8 +87,8 @@ def tool_label(c):
 
 
 def scan(path, st):
-    # v3 adds the session title: an older cache never saw those lines, so read the transcript again.
-    if st.get("v") != 3:
+    # v4 adds the per-turn usage; v3 added the session title: an older cache never saw those lines, so read the transcript again.
+    if st.get("v") != 4:
         acct = st.get("account")
         st.clear(); st.update(zero())
         if acct:
@@ -103,11 +119,16 @@ def scan(path, st):
             except Exception:
                 pass
             continue
-        if b'"usage"' not in line and b'"tool_use"' not in line:
+        user = b'"type":"user"' in line and b'"tool_result"' not in line
+        if not user and b'"usage"' not in line and b'"tool_use"' not in line:
             continue
         try:
             d = json.loads(line)
         except Exception:
+            continue
+        if user:
+            if is_prompt(d):  # a new turn starts: its usage is counted from zero
+                st["turn"] = {"in": 0, "out": 0, "cr": 0, "cw": 0, "by": {}}
             continue
         msg = d.get("message")
         if d.get("type") != "assistant" or not isinstance(msg, dict):
@@ -295,7 +316,7 @@ def main():
             st["account"] = account_of(native, root, pid, cwd)
         out.append({"pid": pid, "account": st.get("account"), "session": sid, "cwd": cwd, "started": s.get("startedAt"),
                     "mtime": mtime, "in": st["in"], "out": st["out"], "cache_read": st["cr"],
-                    "cache_write": st["cw"], "turns": st["turns"], "tools": st["tools"],
+                    "cache_write": st["cw"], "turn": st["turn"], "turns": st["turns"], "tools": st["tools"],
                     "model": st["model"], "ctx": st["ctx"], "base": st["base"], "hist": st["hist"], "tool": st["tool"], "by_model": st["cost_by_model"],
                     "title": st.get("custom") or st.get("title"), "config": config_of(native, root, cwd)})
     # forget sessions that are gone

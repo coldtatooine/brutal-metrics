@@ -25,6 +25,12 @@ const money = (x) => (x >= 100 ? "$" + Math.round(x) : x >= 10 ? "$" + x.toFixed
 const acctName = (a) => (a ? (a.kind === "login" ? a.email : a.label) : null);
 const acctKey = (a) => acctName(a) ?? "?";
 
+// Usage of the current turn (everything since the person's last prompt), in the same shape as a session.
+function turnOf(s) {
+  const t = s?.turn;
+  return t ? { in: t.in, out: t.out, cache_read: t.cr, cache_write: t.cw, by_model: t.by } : s;
+}
+
 function cost(by) {
   let usd = 0;
   for (const [model, [i, o, cr, cw]] of Object.entries(by ?? {})) {
@@ -150,7 +156,7 @@ export default class AgentMetrics extends View {
       .child(div().text_size(9).font_family(MONO).font_bold().text_color(fg).child(label));
     return div().flex_none().p(8).child(v_flex().w_full().border(3).border_color(edge).bg(bg)
       .child(h_flex().px(10).pt(6).items_center().gap(8)
-        .child(div().flex_1().min_w(0).truncate().text_size(11).font_family(MONO).font_black().text_color(fg).child(`${(space?.name ?? "").toUpperCase()} / COST`))
+        .child(div().flex_1().min_w(0).truncate().text_size(11).font_family(MONO).font_black().text_color(fg).child(`${(space?.name ?? "").toUpperCase()} / LAST TURN`))
         .when(hot, (el) => el.child(div().px(6).bg(fg).text_size(11).font_family(MONO).font_black().text_color(bg).loop("opacity", { from: 0.25, to: 1, period: 650 }).child(`${needs} NEEDS YOU`)))
         .when(!hot && waiting > 0, (el) => el.child(div().px(6).border(2).border_color(fg).text_size(11).font_family(MONO).font_black().text_color(fg).loop("opacity", { from: 0.4, to: 1, period: 1500 }).child(`${waiting} WAITING`))))
       .child(div().px(10).text_size(42).font_family(MONO).font_black().text_color(fg).truncate().child(money(totalUsd)))
@@ -193,8 +199,9 @@ export default class AgentMetrics extends View {
       const kids = all.filter((x) => x.parent === a.address && x.state === "live" && (x.status === "working" || x.status === "blocked"));
       const state = a.status === "blocked" ? "blocked" : kids.length > 0 ? "waiting" : a.status;
       const s = sess[a.address];
-      const usd = s ? cost(s.by_model) : 0;
-      return { a, name: a.name, kids, state, s, usd };
+      const u = turnOf(s);
+      const usd = u ? cost(u.by_model) : 0;
+      return { a, name: a.name, kids, state, s, u, usd };
     });
 
     // Accounts in this space, from each agent's own session; most used first.
@@ -208,10 +215,10 @@ export default class AgentMetrics extends View {
     const mainAcct = accounts[0]?.name;
     this.anim = rows.some((r) => animated(r.state));
     const totalUsd = rows.reduce((x, r) => x + r.usd, 0);
-    const totalTok = rows.reduce((x, r) => x + (r.s ? r.s.in + r.s.out + r.s.cache_write : 0), 0);
+    const totalTok = rows.reduce((x, r) => x + (r.u ? r.u.in + r.u.out + r.u.cache_write : 0), 0);
     // Space-wide cache hit (same formula as a card) and the fullest context among its agents.
     const cs = rows.filter((r) => r.s);
-    const cachePct = Math.round((cs.reduce((x, r) => x + r.s.cache_read, 0) / Math.max(1, cs.reduce((x, r) => x + r.s.in + r.s.cache_read + r.s.cache_write, 0))) * 100);
+    const cachePct = Math.round((cs.reduce((x, r) => x + r.u.cache_read, 0) / Math.max(1, cs.reduce((x, r) => x + r.u.in + r.u.cache_read + r.u.cache_write, 0))) * 100);
     const ctxPct = cs.reduce((x, r) => Math.max(x, r.s.ctx / windowOf(r.s.ctx)), 0);
     // What the space's folders have configured: the union over its agents, so a shared user setting counts once.
     const union = (k) => new Set(cs.flatMap((r) => r.s.config?.[k] ?? [])).size;
@@ -297,7 +304,7 @@ export default class AgentMetrics extends View {
       const c = color[r.state] ?? t.dim, hot = r.state === "blocked", s = r.s, ctx = s?.ctx ?? 0;
       const ink = hot ? c : t.foreground, win = windowOf(ctx), pct = s ? ctx / win : 0;
       const left = turnsLeft(s);
-      const cache = s ? Math.round((s.cache_read / Math.max(1, s.in + s.cache_read + s.cache_write)) * 100) : 0;
+      const cache = s ? Math.round((r.u.cache_read / Math.max(1, r.u.in + r.u.cache_read + r.u.cache_write)) * 100) : 0;
       const active = r.state === "working" || r.state === "blocked" || r.state === "waiting";
       // Processing: working itself, or a parent whose sub-agents are working (shown as WAITING).
       const working = r.state === "working" || r.state === "waiting" || r.a.status === "working";

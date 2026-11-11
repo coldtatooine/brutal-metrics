@@ -9,7 +9,7 @@ full its context window is.
 ## Features
 
 - **Summary box** at the top of the panel, in compact cells (value over label):
-  - the estimated total cost of the space, and the account each session
+  - the estimated cost of the space's last turn, and the account each session
     runs as;
   - `AGENTS`, `TOKENS` and `CACHE` (cache reads as a share of all input
     tokens), all summed over the space;
@@ -51,8 +51,11 @@ Your own layout stays as it is. Press `ctrl-shift-l` to switch back.
 
 ## What the numbers mean
 
-- Cost, `TOKENS` and `CACHE` are cumulative for the whole session, not for
-  the last turn.
+- Cost, `TOKENS` and `CACHE` are for the **last turn**: everything since
+  your last prompt, including the model calls and tool loops it triggered.
+  They are not session totals. An idle agent keeps showing its last turn,
+  and a new prompt starts the count from zero. The panel header reads
+  `<SPACE> / LAST TURN`.
 - `CTX MAX` is the context size at the last turn.
 - `PLUGINS`, `MCP` and `HOOKS` count what is configured, not what is
   connected. They are read from the settings files, `.claude.json`,
