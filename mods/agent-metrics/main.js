@@ -278,7 +278,7 @@ export default class AgentMetrics extends View {
       const working = r.state === "working" || r.state === "waiting" || r.a.status === "working";
       return h_flex().id(`m-${r.a.address}`).w_full().ml(r.a.depth * 12).relative()
         .border(2).border_color(working ? "#00000000" : hot ? c : t.border).bg(hot ? c + "26" : t.surface)
-        .child(v_flex().flex_none().self_stretch().w(r.a.depth > 0 ? 40 : 54).items_center().pb(4).bg(t.chrome).border_r(2).border_color(hot ? c : t.border)
+        .child(v_flex().flex_none().self_stretch().w(r.a.depth > 0 ? 48 : 62).items_center().pb(4).bg(t.chrome).border_r(2).border_color(hot ? c : t.border)
           .child(div().flex_1().flex().items_center().justify_center()
             .child(avatar(r.a.address, r.a.depth > 0 ? 4 : 5, r.state, this.tick)))
           // terminal code (hc address), pinned to the bottom of the avatar column

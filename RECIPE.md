@@ -45,7 +45,7 @@ weights, uppercase:
   With more than one account it shows `N CONTAS` and `email ×count` lines.
 - **One card per agent** in the active space, with its sub-agents (terminals
   it started) indented 12px per level:
-  - Left column (54px, or 40px for sub-agents): the pixel avatar, with the
+  - Left column (62px, or 48px for sub-agents): the pixel avatar, with the
     terminal address (`t13`) underneath.
   - Name in caps and a status stamp (`NEEDS YOU`, `WAITING n`, `WORKING`,
     `DONE`, `IDLE`).
