@@ -118,13 +118,18 @@ def hc_event(d, sid):
         text = prompt_text(d)
     else:
         return None
-    m = HC_TAG.match(text)
-    ts = epoch_ms(d.get("timestamp"))
-    if not m or ts is None or not d.get("uuid"):
+    return hc_message(text, d.get("timestamp"), d.get("uuid"), sid)
+
+
+def hc_message(text, timestamp, line_id, sid):
+    """The event of a message text that starts with an hc tag (Claude or Codex), or None."""
+    m = HC_TAG.match(text or "")
+    ts = epoch_ms(timestamp)
+    if not m or ts is None or not line_id:
         return None
     text = " ".join(m.group(3).split())
     summary = text if len(text) <= SUMMARY_MAX else text[: SUMMARY_MAX - 1].rstrip() + "…"
-    return {"id": f"{sid}:{d['uuid']}", "ts": ts, "from": m.group(1), "from_name": m.group(2) or None,
+    return {"id": f"{sid}:{line_id}", "ts": ts, "from": m.group(1), "from_name": m.group(2) or None,
             "to": None, "to_session": sid, "kind": "send", "summary": summary}
 
 
@@ -346,6 +351,176 @@ def account_of(native, root, pid, cwd):
     return None
 
 
+# ---- Codex ----------------------------------------------------------------------------------------
+# Codex CLI keeps one rollout per thread: <codex home>/sessions/YYYY/MM/DD/rollout-<time>-<thread id>.jsonl.
+# Read-only, like the Claude side. The rollout says: session_meta (id, cwd, start), turn_context (model),
+# event_msg task_started (context window, a new turn), event_msg token_count (running totals, the last
+# request's usage, plan rate limits), response_item (tool calls, and the prompts, where hc messages arrive).
+CODEX_V = "codex1"  # cache layout of a Codex entry
+CODEX_DAYS = 7      # day folders looked at: a thread started earlier than that is not seen
+LIVE_S = 2 * 86400  # a rollout untouched for longer is not a running agent
+
+
+def codex_zero():
+    return {"v": CODEX_V, "off": 0, "agent": "codex", "id": None, "cwd": None, "started": None, "model": None,
+            "tot": [0, 0, 0, 0], "snap": [0, 0, 0, 0], "turns": 0, "tools": 0, "ctx": 0, "base": 0, "hist": [],
+            "tool": None, "window": None, "plan": None}
+
+
+def codex_usage(u):
+    """Codex usage as the Claude fields: input without the cached part, output, cache read, cache write."""
+    i, cached = u.get("input_tokens", 0), u.get("cached_input_tokens", 0)
+    return [max(0, i - cached), u.get("output_tokens", 0), cached, u.get("cache_write_input_tokens", 0)]
+
+
+def codex_tool(p):
+    name, args = p.get("name") or "tool", p.get("arguments") if p.get("type") == "function_call" else p.get("input")
+    target = ""
+    if isinstance(args, str):
+        try:
+            a = json.loads(args)
+            c = a.get("command") or a.get("cmd") or a.get("path") or a.get("file_path") or ""
+            target = " ".join(c) if isinstance(c, list) else str(c)
+        except Exception:
+            target = args
+    return (name + " " + " ".join(target.split())[:40]).strip()
+
+
+def scan_codex(path, st, events):
+    if st.get("v") != CODEX_V or os.path.getsize(path) < st["off"]:
+        st.clear(); st.update(codex_zero())
+    with open(path, "rb") as f:
+        f.seek(st["off"])
+        data = f.read()
+    end = data.rfind(b"\n")
+    if end < 0:
+        return
+    st["off"] += end + 1
+    for line in data[: end + 1].split(b"\n"):
+        if not line.strip():
+            continue
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        t, p = d.get("type"), d.get("payload") or {}
+        if not isinstance(p, dict):
+            continue
+        pt = p.get("type")
+        if t == "session_meta":
+            st["id"] = p.get("id") or p.get("session_id")
+            st["cwd"] = p.get("cwd")
+            st["started"] = epoch_ms(p.get("timestamp") or d.get("timestamp"))
+        elif t == "turn_context":
+            st["model"] = p.get("model") or st["model"]
+        elif t == "event_msg" and pt == "task_started":
+            st["window"] = p.get("model_context_window") or st["window"]
+            # a turn the person (or an hc message) started; Codex automations' heartbeats are not prompts
+            if ((p.get("turn_attribution") or {}).get("turn_trigger") or "user") == "user":
+                st["snap"] = list(st["tot"])
+        elif t == "event_msg" and pt == "token_count":
+            info = p.get("info") or {}
+            if isinstance(info.get("total_token_usage"), dict):
+                st["tot"] = codex_usage(info["total_token_usage"])
+            last = info.get("last_token_usage")
+            if isinstance(last, dict):
+                st["turns"] += 1
+                st["ctx"] = last.get("total_tokens") or last.get("input_tokens", 0) + last.get("output_tokens", 0)
+                st["base"] = st["base"] or last.get("input_tokens", 0)
+                st["hist"] = (st["hist"] + [st["ctx"]])[-24:]
+            st["window"] = info.get("model_context_window") or st["window"]
+            rl = p.get("rate_limits") or {}
+            prim = rl.get("primary") or {}
+            if rl:
+                st["plan"] = {"type": rl.get("plan_type"), "used": prim.get("used_percent"),
+                              "window_min": prim.get("window_minutes"), "resets": prim.get("resets_at")}
+        elif t == "response_item" and pt in ("function_call", "custom_tool_call"):
+            st["tools"] += 1
+            st["tool"] = codex_tool(p)
+        elif t == "response_item" and pt == "message" and p.get("role") == "user" and events is not None and b"<hc from=" in line:
+            text = "".join(c.get("text", "") for c in p.get("content") or [] if isinstance(c, dict) and c.get("type") == "input_text")
+            ev = hc_message(text, d.get("timestamp"), p.get("id"), st["id"] or "?")
+            if ev:
+                events.append(ev)
+
+
+def codex_titles(home):
+    """Thread id -> name, from session_index.jsonl (one line per rename; the last one wins)."""
+    out = {}
+    try:
+        with open(os.path.join(home, "session_index.jsonl"), encoding="utf-8") as f:
+            for line in f:
+                try:
+                    d = json.loads(line)
+                    if d.get("id") and d.get("thread_name"):
+                        out[d["id"]] = d["thread_name"]
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return out
+
+
+def codex_config(home):
+    """Codex's configured MCP servers, enabled plugins and hook handlers, named apart from Claude's."""
+    try:
+        import tomllib
+        with open(os.path.join(home, "config.toml"), "rb") as f:
+            cfg = tomllib.load(f)
+    except Exception:
+        cfg = {}
+    plugins = sorted("codex:" + k for k, v in (cfg.get("plugins") or {}).items() if not isinstance(v, dict) or v.get("enabled", True))
+    mcp = sorted("codex:" + k for k in (cfg.get("mcp_servers") or {}))
+    hooks = hook_keys("codex:hooks.json", read_json(os.path.join(home, "hooks.json")).get("hooks"))
+    hooks += hook_keys("codex:config.toml", cfg.get("hooks"))
+    return {"mcp": mcp, "hooks": sorted(set(hooks)), "plugins": plugins}
+
+
+def codex_rollouts(home):
+    """Rollouts in the day folders of the last CODEX_DAYS days (and tomorrow's, for time zones) changed lately."""
+    now, out = time.time(), []
+    for k in range(-1, CODEX_DAYS + 1):
+        day = time.strftime("%Y/%m/%d", time.localtime(now - k * 86400))
+        for p in glob.glob(os.path.join(home, "sessions", day, "rollout-*.jsonl")):
+            try:
+                if now - os.path.getmtime(p) <= LIVE_S:
+                    out.append(p)
+            except OSError:
+                pass
+    return sorted(set(out))
+
+
+def codex_sessions(homes, cache, found):
+    out = []
+    for home in homes:
+        titles, config = None, None
+        for path in codex_rollouts(home):
+            key = "codex:" + os.path.basename(path)
+            st = cache.setdefault(key, codex_zero())
+            try:
+                scan_codex(path, st, found)
+                mtime = int(os.path.getmtime(path) * 1000)
+            except Exception as e:
+                print(f"scan {path}: {e}", file=sys.stderr)
+                continue
+            if not st["id"]:
+                continue
+            if titles is None:
+                titles, config = codex_titles(home), codex_config(home)
+            tot, snap, model = st["tot"], st["snap"], st["model"] or "codex"
+            turn = [a - b for a, b in zip(tot, snap)]
+            plan = st["plan"] or {}
+            out.append({"agent": "codex", "cache_key": key, "pid": None, "session": st["id"], "cwd": st["cwd"], "started": st["started"], "mtime": mtime,
+                        "account": {"kind": "plan", "label": ("CHATGPT " + plan["type"].upper()) if plan.get("type") else "CHATGPT",
+                                    "email": None, "org": "OPENAI"},
+                        "in": tot[0], "out": tot[1], "cache_read": tot[2], "cache_write": tot[3],
+                        "turn": {"in": turn[0], "out": turn[1], "cr": turn[2], "cw": turn[3], "by": {model: turn}},
+                        "turns": st["turns"], "tools": st["tools"], "model": st["model"], "ctx": st["ctx"], "base": st["base"],
+                        "hist": st["hist"], "tool": st["tool"], "by_model": {model: list(tot)}, "window": st["window"],
+                        "plan": st["plan"], "title": titles.get(st["id"]), "config": config})
+    return out
+
+
 def parse_args(argv):
     """(since, extra roots). An unknown or missing cursor counts as none: every kept event is printed."""
     since, rest, i = 0, [], 0
@@ -413,13 +588,20 @@ def main():
         # Pinned on first sight: a later /login must not relabel a session that is already running.
         if not st.get("account"):
             st["account"] = account_of(native, root, pid, cwd)
-        out.append({"pid": pid, "account": st.get("account"), "session": sid, "cwd": cwd, "started": s.get("startedAt"),
+        out.append({"agent": "claude", "pid": pid, "account": st.get("account"), "session": sid, "cwd": cwd, "started": s.get("startedAt"),
                     "mtime": mtime, "in": st["in"], "out": st["out"], "cache_read": st["cr"],
                     "cache_write": st["cw"], "turn": st["turn"], "turns": st["turns"], "tools": st["tools"],
                     "model": st["model"], "ctx": st["ctx"], "base": st["base"], "hist": st["hist"], "tool": st["tool"], "by_model": st["cost_by_model"],
                     "title": st.get("custom") or st.get("title"), "config": config_of(native, root, cwd)})
+    # Codex: its home sits next to each Claude config folder (~/.codex beside ~/.claude), on either OS.
+    homes = []
+    for root, _ in roots:
+        h = os.path.join(os.path.dirname(root.rstrip("/")), ".codex")
+        if os.path.isdir(os.path.join(h, "sessions")) and h not in homes:
+            homes.append(h)
+    out += codex_sessions(homes, cache, found)
     # forget sessions that are gone
-    live = {o["session"] for o in out}
+    live = {o.get("cache_key") or o["session"] for o in out}
     for k in list(cache):
         if k not in live:
             del cache[k]

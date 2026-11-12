@@ -1,6 +1,6 @@
 // Per-agent usage metrics for the selected space: context, tokens, cost, and a blink
 // for agents that need a human (blocked) or are waiting on other agents.
-// Data: Claude Code transcripts, read in WSL by collect.py. Read-only; no network.
+// Data: Claude Code transcripts and Codex rollouts, read in WSL by collect.py. Read-only; no network.
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { avatar, animated } from "./avatar.js";
@@ -20,6 +20,11 @@ const PRICES = [
 const WARN = 0.6, HIGH = 0.8;
 // Context window: Claude Code reports no limit, so infer it (over 200k means the 1M window).
 const windowOf = (ctx) => (ctx > 200_000 ? 1_000_000 : 200_000);
+// A session's window: Codex reports its own; Claude's is inferred from the context size.
+const winOf = (s) => s?.window || windowOf(s?.ctx ?? 0);
+// Which agent a session or a terminal is: "claude", "codex", or null when the terminal doesn't say.
+const kindOfApp = (app) => (/codex/i.test(app ?? "") ? "codex" : /claude/i.test(app ?? "") ? "claude" : null);
+const isCodex = (s) => s?.agent === "codex";
 
 const fmt = (n) => (n >= 1e9 ? (n / 1e9).toFixed(1) + "B" : n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? Math.round(n / 1e3) + "k" : String(n));
 const money = (x) => (x >= 100 ? "$" + Math.round(x) : x >= 10 ? "$" + x.toFixed(1) : "$" + x.toFixed(2));
@@ -151,6 +156,11 @@ export default class AgentMetrics extends View {
     const norm = (p) => (p ?? "").replaceAll("\\", "/").replace(/^\/\/wsl[.]localhost\/[^/]+/i, "").replace(/\/+$/, "").toLowerCase();
     const cwds = Object.fromEntries(panes().map((p) => [p.terminal, p.cwd]));
     const folderOf = (addr) => norm(cwds[addr] ?? terminals().find((x) => x.address === addr)?.cwd);
+    // A Claude session never goes to a Codex terminal, nor the reverse; a terminal that reports no app takes either.
+    const kinds = Object.fromEntries([...panes(), ...agents()].filter((x) => x.app).map((x) => [x.terminal ?? x.address, kindOfApp(x.app)]));
+    const fits = (addr, s) => !kinds[addr] || kinds[addr] === (s.agent ?? "claude");
+    // Codex titles its terminal "<thread name> | <folder>"; Claude Code uses the session title as is.
+    const sameTitle = (term, sess) => Boolean(sess) && (term === sess || term.startsWith(sess + " | "));
     // Two sessions can share a title (two agents named after the same AGENTS.md). Pair title plus folder
     // first, then title alone, so a terminal in that folder isn't robbed by one elsewhere with the newer mtime.
     for (const sameFolder of [true, false]) {
@@ -158,7 +168,7 @@ export default class AgentMetrics extends View {
         if (out[a.address]) continue;
         const t = clean(titleOf(a.address)), here = folderOf(a.address);
         if (!t || (sameFolder && !here)) continue;
-        const s = sessions.filter((s) => !used.has(s.session) && clean(s.title) === t && (!sameFolder || norm(s.cwd) === here))
+        const s = sessions.filter((s) => !used.has(s.session) && fits(a.address, s) && sameTitle(t, clean(s.title)) && (!sameFolder || norm(s.cwd) === here))
           .sort((x, y) => (y.mtime ?? 0) - (x.mtime ?? 0))[0];
         if (s) { out[a.address] = s; used.add(s.session); }
       }
@@ -168,13 +178,13 @@ export default class AgentMetrics extends View {
     const byStart = [...sessions].sort((x, y) => x.started - y.started);
     for (const a of [...list].filter((a) => this.created[a.address] && !out[a.address]).sort((x, y) => this.created[x.address] - this.created[y.address])) {
       const c = this.created[a.address];
-      const s = byStart.find((s) => !used.has(s.session) && s.started - c >= -2000 && s.started - c < 60000);
+      const s = byStart.find((s) => !used.has(s.session) && fits(a.address, s) && s.started - c >= -2000 && s.started - c < 60000);
       if (s) { out[a.address] = s; used.add(s.session); }
     }
     for (const a of list) {
       if (out[a.address]) continue;
       const here = folderOf(a.address);
-      const cand = sessions.filter((s) => !used.has(s.session) && here && norm(s.cwd) === here).sort((x, y) => (y.mtime ?? 0) - (x.mtime ?? 0))[0];
+      const cand = sessions.filter((s) => !used.has(s.session) && fits(a.address, s) && here && norm(s.cwd) === here).sort((x, y) => (y.mtime ?? 0) - (x.mtime ?? 0))[0];
       if (cand) { out[a.address] = cand; used.add(cand.session); }
     }
     return out;
@@ -183,6 +193,9 @@ export default class AgentMetrics extends View {
   // Brutalist summary: big mono numbers, thick borders, solid blocks. Turns red and blinks when someone is needed.
   hero(t, { space, rows, totalUsd, totalTok, cachePct, ctxPct, cfg, needs, waiting, accounts }) {
     const MONO = "JetBrains Mono";
+    // Agent-kind tag: Claude's brand orange, muted; a cool light silver for Codex (the palette's #adc1cc).
+    const KIND_CLAUDE = "#c9744f", KIND_CODEX = "#adc1cc";
+    const ACCT = "#7f8f9a"; // account tag: a cool, dim slate between the palette's #7a8076 and #95a7a7
     const hot = needs > 0;
     // Palette grays from the reference still; rust (#95553a) when someone is needed.
     const bg = hot ? "#95553a" : "#7a8076", fg = "#0a1312", edge = hot ? "#b09270" : "#95a7a7";
@@ -247,8 +260,10 @@ export default class AgentMetrics extends View {
       const state = a.status === "blocked" ? "blocked" : kids.length > 0 ? "waiting" : a.status;
       const s = sess[a.address];
       const u = this.view === "total" ? s : turnOf(s);
-      const usd = u ? cost(u.by_model) : 0;
-      return { a, name: a.name, kids, state, s, u, usd };
+      // Codex runs on a ChatGPT plan: no price table applies, so it adds no dollars (its card shows plan use).
+      const usd = u && !isCodex(s) ? cost(u.by_model) : 0;
+      const kind = s?.agent ?? kindOfApp(agents().find((x) => x.address === a.address)?.app);
+      return { a, name: a.name, kids, state, s, u, usd, kind };
     });
 
     // Accounts in this space, from each agent's own session; most used first.
@@ -266,7 +281,7 @@ export default class AgentMetrics extends View {
     // Space-wide cache hit (same formula as a card) and the fullest context among its agents.
     const cs = rows.filter((r) => r.s);
     const cachePct = Math.round((cs.reduce((x, r) => x + r.u.cache_read, 0) / Math.max(1, cs.reduce((x, r) => x + r.u.in + r.u.cache_read + r.u.cache_write, 0))) * 100);
-    const ctxPct = cs.reduce((x, r) => Math.max(x, r.s.ctx / windowOf(r.s.ctx)), 0);
+    const ctxPct = cs.reduce((x, r) => Math.max(x, r.s.ctx / winOf(r.s)), 0);
     // What the space's folders have configured: the union over its agents, so a shared user setting counts once.
     const union = (k) => new Set(cs.flatMap((r) => r.s.config?.[k] ?? [])).size;
     const cfg = { plugins: union("plugins"), mcp: union("mcp"), hooks: union("hooks") };
@@ -276,6 +291,9 @@ export default class AgentMetrics extends View {
     const color = { blocked: t.blocked, waiting: t.accent, working: t.working, done: t.done, idle: t.dim };
     // Brutalist rows: square blocks, 2px borders, mono caps, a solid status stamp, a chunky segmented bar.
     const MONO = "JetBrains Mono";
+    // Agent-kind tag: Claude's brand orange, muted; a cool light silver for Codex (the palette's #adc1cc).
+    const KIND_CLAUDE = "#c9744f", KIND_CODEX = "#adc1cc";
+    const ACCT = "#7f8f9a"; // account tag: a cool, dim slate between the palette's #7a8076 and #95a7a7
     const label = (r) => r.state === "blocked" ? "NEEDS YOU"
       : r.state === "waiting" ? `WAITING ${r.kids.length}`
       : r.state.toUpperCase();
@@ -294,7 +312,7 @@ export default class AgentMetrics extends View {
     const SEGS = 24;
     const BASE_C = "#7a8076", CONV_C = "#b09270", HIGH_C = "#95553a", FREE_C = "#1d1e19";
     const bar = (r) => {
-      const ctx = r.s?.ctx ?? 0, win = windowOf(ctx), base = Math.min(r.s?.base ?? 0, ctx);
+      const ctx = r.s?.ctx ?? 0, win = winOf(r.s), base = Math.min(r.s?.base ?? 0, ctx);
       const nBase = base > 0 ? Math.max(1, Math.round((base / win) * SEGS)) : 0;
       const nUsed = Math.min(SEGS, Math.max(nBase, Math.round((ctx / win) * SEGS)));
       const conv = ctx / win >= HIGH ? HIGH_C : CONV_C;
@@ -307,32 +325,33 @@ export default class AgentMetrics extends View {
       for (let i = 1; i < h.length; i++) if (h[i] > h[i - 1]) d.push(h[i] - h[i - 1]);
       if (d.length < 2) return null;
       const avg = d.reduce((x, y) => x + y, 0) / d.length;
-      return Math.max(0, Math.ceil((windowOf(s.ctx) - s.ctx) / avg));
+      return Math.max(0, Math.ceil((winOf(s) - s.ctx) / avg));
     };
     const age = (ms) => { const m = Math.floor(ms / 60000); return m < 1 ? "now" : m < 60 ? `${m}m` : m < 1440 ? `${Math.floor(m / 60)}h` : `${Math.floor(m / 1440)}d`; };
 
     // /clear: types /clear into the agent's terminal, starting a fresh context. It throws the conversation
-    // away, so the first click arms it (CONFIRM?) and a second click within 3s sends it.
+    // away, so the first click arms it (CONFIRM?) and a second click within 3s sends it. Codex has /clear too.
     const ARM_MS = 3000;
     const clearBtn = (r) => {
       const armed = this.armed?.address === r.a.address && Date.now() - this.armed.at < ARM_MS;
+      const cmd = "/clear";
       return div().id(`clr-${r.a.address}`).flex_none().px(6).h(18).flex().items_center()
         .text_size(10.5).font_family(MONO).font_black().cursor_pointer()
         .border(2).border_color(armed ? t.blocked : t.border)
         .bg(armed ? t.blocked : "#00000000").text_color(armed ? (t.accent_foreground ?? t.background) : t.muted)
         .hover((s) => s.border_color(armed ? t.blocked : t.foreground).text_color(armed ? (t.accent_foreground ?? t.background) : t.foreground))
-        .tooltip(armed ? "Click again to clear this agent's context" : "Run /clear in this agent")
+        .tooltip(armed ? "Click again to clear this agent's context" : `Run ${cmd} in this agent`)
         .on_click((_e, cx) => {
           cx.stop_propagation();
           if (armed) {
             this.armed = null;
-            hc(["send", r.a.address, "/clear"]).catch((e) => { this.error = String(e?.message ?? e); });
+            hc(["send", r.a.address, cmd]).catch((e) => { this.error = String(e?.message ?? e); });
           } else {
             this.armed = { address: r.a.address, at: Date.now() };
           }
           cx.notify();
         })
-        .child(armed ? "CONFIRM?" : "/CLEAR");
+        .child(armed ? "CONFIRM?" : cmd.toUpperCase());
     };
 
     // /compact: summarizes the conversation in place, so nothing is lost and one click is enough.
@@ -349,7 +368,10 @@ export default class AgentMetrics extends View {
 
     const row = (r) => {
       const c = color[r.state] ?? t.dim, hot = r.state === "blocked", s = r.s, ctx = s?.ctx ?? 0;
-      const ink = hot ? c : t.foreground, win = windowOf(ctx), pct = s ? ctx / win : 0;
+      const ink = hot ? c : t.foreground, win = winOf(s), pct = s ? ctx / win : 0;
+      // Codex: the share of the plan's rate limit used (its primary window), instead of dollars.
+      const plan = isCodex(s) ? s.plan : null;
+      const planPct = plan?.used != null ? Math.round(plan.used) : null;
       const left = turnsLeft(s);
       const cache = s ? Math.round((r.u.cache_read / Math.max(1, r.u.in + r.u.cache_read + r.u.cache_write)) * 100) : 0;
       const active = r.state === "working" || r.state === "blocked" || r.state === "waiting";
@@ -360,6 +382,12 @@ export default class AgentMetrics extends View {
         .child(v_flex().flex_none().self_stretch().w(r.a.depth > 0 ? 46 : 60).pl(2).items_center().pb(4).bg(t.chrome).border_r(2).border_color(hot ? c : t.border)
           .child(div().flex_1().flex().items_center().justify_center()
             .child(avatar(r.a.address, r.a.depth > 0 ? 4 : 5, r.state, this.tick)))
+          // which agent this is: CLAUDE or CODEX, small and dim, just above the terminal code;
+          // nothing when neither the session nor the terminal says
+          .when(Boolean(r.kind), (el) => el.child(div().id(`kind-${r.a.address}`).flex_none()
+            .text_size(r.a.depth > 0 ? 7.5 : 8).font_family(MONO).font_bold().text_color(r.kind === "codex" ? KIND_CODEX : KIND_CLAUDE)
+            .tooltip(r.kind === "codex" ? `Codex${s?.model ? " · " + s.model : ""}` : `Claude Code${s?.model ? " · " + s.model : ""}`)
+            .child(r.kind.toUpperCase())))
           // terminal code (hc address), pinned to the bottom of the avatar column
           // click: open (focus) this agent's terminal; sub-agents without a pane get one
           .child(div().id(`term-${r.a.address}`).flex_none().px(3).cursor_pointer()
@@ -375,7 +403,6 @@ export default class AgentMetrics extends View {
         .child(v_flex().flex_1().min_w(0).p(8).gap(6)
           .child(h_flex().gap(8).items_center()
             .child(div().flex_1().min_w(0).truncate().text_size(r.a.depth > 0 ? 11 : 12).font_family(MONO).font_black().text_color(r.a.focused ? t.accent : ink).child(r.name.toUpperCase()))
-            .when(accounts.length > 1 && acctKey(s?.account) !== mainAcct, (el) => el.child(div().flex_none().px(4).h(18).flex().items_center().border(2).border_color(t.foreground).text_size(10).font_family(MONO).font_black().text_color(t.foreground).child(`@${(acctName(s?.account) ?? "?").split("@").pop().split(".")[0].toUpperCase()}`)))
             .child(stamp(r)))
           .child(s ? bar(r) : div().h(5).border(2).border_color(t.border))
           .child(h_flex().gap(8).items_baseline().text_size(11).font_family(MONO).text_color(t.muted)
@@ -386,9 +413,20 @@ export default class AgentMetrics extends View {
               .when(left !== null, (e) => e.child(div().text_color(left <= 10 ? "#b09270" : t.muted).font_bold().child(`~${left > 99 ? "99+" : left}T`)))
               .child(s.mtime ? age(Date.now() - s.mtime) : "")
               .child(div().flex_1())
-              .child(div().text_size(15).font_black().text_color(t.foreground).child(money(r.usd)))))
+              .when(!isCodex(s), (e) => e.child(div().text_size(15).font_black().text_color(t.foreground).child(money(r.usd))))
+              .when(isCodex(s), (e) => e.child(div().id(`plan-${r.a.address}`).text_size(15).font_black().text_color(planPct >= 80 ? t.blocked : t.foreground)
+                .tooltip(`${plan?.type ? plan.type.toUpperCase() + " plan" : "Plan"}: ${planPct ?? "?"}% of the ${plan?.window_min ? Math.round(plan.window_min / 1440) + "-day" : ""} limit used`)
+                .child(planPct === null ? "—" : `${planPct}%`)))))
           .when(Boolean(s?.tool) && active, (el) => el.child(div().truncate().text_size(10.5).font_family(MONO).text_color(hot ? c : t.dim).child(`▸ ${s.tool}`)))
-          .child(h_flex().justify_end().gap(6).child(compactBtn(r)).child(clearBtn(r))))
+          // Bottom row: the account (only when it is not the main one), small and dim on the left, cut
+          // with an ellipsis before it can push the buttons; the buttons stay right-aligned.
+          .child(h_flex().items_center().gap(6)
+            .child(div().flex_1().min_w(0)
+              .when(accounts.length > 1 && acctKey(s?.account) !== mainAcct, (el) => el.child(
+                div().id(`acct-${r.a.address}`).truncate().text_size(9.5).font_family(MONO).font_bold().text_color(ACCT)
+                  .tooltip(`Account: ${acctName(s?.account) ?? "?"}`)
+                  .child(`@${(acctName(s?.account) ?? "?").split("@").pop().split(".")[0].toUpperCase()}`))))
+            .child(compactBtn(r)).child(clearBtn(r))))
         // Last child: drawn over the avatar column and the content, so all four edges show.
         .when(working, (el) => el.child(rainbowEdge(this.tick)));
     };

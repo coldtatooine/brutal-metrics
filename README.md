@@ -1,8 +1,8 @@
 # Brutal Metrics
 
 A [Herdr](https://herdr.dev) layout with a brutalist cost panel. It shows
-what each Claude Code agent in a space spends in dollars and tokens, and how
-full its context window is.
+what each Claude Code or Codex agent in a space spends in dollars (Claude) or
+plan use (Codex) and tokens, and how full its context window is.
 
 ![Brutal Metrics](preview.png)
 
@@ -16,6 +16,7 @@ full its context window is.
   - `CTX MAX`, the fullest context window among the agents (tinted from 80%);
   - `PLUGINS`, `MCP` and `HOOKS`, the configured items across the agents.
 - **One card per agent**, with sub-agents nested under it:
+  - a `CLAUDE` or `CODEX` tag;
   - a thin 24-segment context bar split into base (system prompt, tools,
     MCP), conversation and free space;
   - the context size against the window size, the cache hit rate, an
@@ -71,7 +72,10 @@ Your own layout stays as it is. Press `ctrl-shift-l` to switch back.
     `DISTRO = "Ubuntu"` in `mods/agent-metrics/main.js`, so edit that if
     yours has another name.
   - On other systems it runs with `python3`.
-- **Claude Code**: other agents appear but show `NO DATA`.
+- **Claude Code** or **Codex CLI**: other agents appear but show `NO DATA`.
+  Codex is found next to Claude's folder (`~/.codex` beside `~/.claude`, on
+  Windows or in WSL). Only threads started in the last 7 days and active in
+  the last 2 are read.
 
 ## What it reads and runs
 
@@ -82,8 +86,15 @@ Your own layout stays as it is. Press `ctrl-shift-l` to switch back.
     servers and hooks;
   - `~/.claude.json` or settings `env`, for the account (email, org or
     credential kind, never a token).
+- It also reads these Codex files, without changing them:
+  - the rollouts in `~/.codex/sessions/YYYY/MM/DD/`, for the folder, model,
+    context window, token totals, the last request's usage, the tool in use
+    and the plan's rate-limit use;
+  - `session_index.jsonl` for thread names, and `config.toml` and
+    `hooks.json` to count plugins, MCP servers and hooks. It never reads
+    `auth.json`. The account shown is the plan type from the rollout.
 
-  From the same transcripts it also picks up the messages agents send each
+  From the same transcripts and rollouts it also picks up the messages agents send each
   other with `hc send`. Each one arrives as a line starting with
   `<hc from="tN">`, either as a prompt or absorbed into a running turn. The last
   50 come out as `events`: `id`, `seq`, `ts`, `from` (the sender's hc
@@ -103,10 +114,15 @@ Your own layout stays as it is. Press `ctrl-shift-l` to switch back.
 
 - Costs are **estimates**: token usage times the `PRICES` table in
   `mods/agent-metrics/main.js`. Edit the table to match your models and plan.
+- Codex on a ChatGPT plan has no per-token price. Its card shows the share of
+  the plan's rate limit used instead of dollars, and it adds nothing to the
+  dollar total.
+- A terminal is paired only with a session of its own kind: Claude with
+  Claude, Codex with Codex. The kind comes from what the agent reports to Herdr.
 - The panel shows each session's login email. Keep that in mind before you
   share a screenshot.
-- Message events only cover messages that reached a Claude Code agent and were
-  written to its transcript. These are not seen: messages to other programs, sends that never arrived
+- Message events only cover messages that reached a Claude Code or Codex agent
+  and were written to its transcript or rollout. These are not seen: messages to other programs, sends that never arrived
   (an agent starting up or blocked), and text typed without an hc tag
   (including with `notes = false` in hc's config). A tag pasted by hand counts
   as a message. A message sent while the receiver is busy shows up when the
