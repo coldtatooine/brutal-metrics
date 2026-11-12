@@ -112,8 +112,15 @@ Your own layout stays as it is. Press `ctrl-shift-l` to switch back.
 
 ## Notes
 
-- Costs are **estimates**: token usage times the `PRICES` table in
-  `mods/agent-metrics/main.js`. Edit the table to match your models and plan.
+- Costs are what the tokens would cost on the **Anthropic API at list
+  price**, not what a Claude subscription bills you. They are token usage
+  times the `PRICES` table in `mods/agent-metrics/main.js`, which has one row
+  per model (id without its date suffix): input, output, cache read, and
+  cache write with the 5-minute and the 1-hour TTL, priced apart. Claude Haiku
+  5.5 requests whose prompt is over 100k tokens use its higher rate.
+- A model missing from the table is priced as its family's current model
+  (Opus, Sonnet, Haiku or Fable), and its cost shows with a `~`, as in `~$1.20`.
+  Add a row to price it exactly.
 - Codex on a ChatGPT plan has no per-token price. Its card shows the share of
   the plan's rate limit used instead of dollars, and it adds nothing to the
   dollar total.

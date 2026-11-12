@@ -4,19 +4,43 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { avatar, animated } from "./avatar.js";
-import { spaces, agents, terminals, panes, exec, hc, appHome, home, window, theme, run, shared, setShared } from "herdr";
+import { spaces, agents, terminals, panes, exec, hc, appHome, home, window, theme, run, shared, setShared, settings } from "herdr";
 
 // Feed for the Flow tab (agent-flow): the collector's message events, `to` resolved here by match().
 const FLOW_KEY = "flow.events", FLOW_HEARTBEAT_MS = 15000;
 
 const DISTRO = "Ubuntu";
 const REFRESH_MS = 5000;
-// USD per million tokens: [input, output, cache read, cache write]. Estimates: edit to match your plan.
-const PRICES = [
-  [/opus/, [15, 75, 1.5, 18.75]],
-  [/haiku/, [1, 5, 0.1, 1.25]],
-  [/./, [3, 15, 0.3, 3.75]], // sonnet and anything unknown
-];
+// Anthropic API list prices, USD per million tokens: [input, output, cache read, cache write 5m, cache write 1h].
+// Source: platform.claude.com/docs/en/about-claude/pricing (checked 2026-11-12). Keyed by model id without a
+// date suffix; "@long" is a request over the model's long-prompt size (the collector tags those).
+const PRICES = {
+  "claude-fable-5-2": [8, 40, 0.2, 10, 16],
+  "claude-mythos-5-2": [8, 40, 0.2, 10, 16],
+  "claude-fable-5-1": [10, 50, 0.25, 12.5, 20],
+  "claude-mythos-5-1": [10, 50, 0.25, 12.5, 20],
+  "claude-fable-5": [10, 50, 1, 12.5, 20],
+  "claude-mythos-5": [10, 50, 1, 12.5, 20],
+  "claude-opus-5-5": [4, 20, 0.2, 5, 8],
+  "claude-opus-5": [5, 25, 0.5, 6.25, 10],
+  "claude-opus-4-8": [5, 25, 0.5, 6.25, 10],
+  "claude-opus-4-7": [5, 25, 0.5, 6.25, 10],
+  "claude-opus-4-6": [5, 25, 0.5, 6.25, 10],
+  "claude-opus-4-5": [5, 25, 0.5, 6.25, 10],
+  "claude-opus-4-1": [15, 75, 1.5, 18.75, 30],
+  "claude-opus-4": [15, 75, 1.5, 18.75, 30],
+  "claude-sonnet-5-5": [2, 10, 0.1, 2.5, 4],
+  "claude-sonnet-5": [2, 10, 0.2, 2.5, 4],
+  "claude-sonnet-4-6": [3, 15, 0.3, 3.75, 6],
+  "claude-sonnet-4-5": [3, 15, 0.3, 3.75, 6],
+  "claude-sonnet-4": [3, 15, 0.3, 3.75, 6],
+  "claude-haiku-5-5": [0.1, 0.5, 0.01, 0.125, 0.2],
+  "claude-haiku-5-5@long": [0.5, 2.5, 0.05, 0.625, 1],
+  "claude-haiku-4-5": [1, 5, 0.1, 1.25, 2],
+};
+// A model not in the table: priced by its family's current model, and the cost is shown as an estimate (~).
+const FAMILY = [[/fable|mythos/, "claude-fable-5-2"], [/opus/, "claude-opus-5-5"], [/haiku/, "claude-haiku-5-5"], [/./, "claude-sonnet-5-5"]];
+const COST_TIP = "API-equivalent cost at Anthropic list prices, not what a subscription is billed";
 const WARN = 0.6, HIGH = 0.8;
 // Context window: Claude Code reports no limit, so infer it (over 200k means the 1M window).
 const windowOf = (ctx) => (ctx > 200_000 ? 1_000_000 : 200_000);
@@ -39,14 +63,28 @@ function turnOf(s) {
   return t ? { in: t.in, out: t.out, cache_read: t.cr, cache_write: t.cw, by_model: t.by } : s;
 }
 
-function cost(by) {
-  let usd = 0;
-  for (const [model, [i, o, cr, cw]] of Object.entries(by ?? {})) {
-    const p = PRICES.find(([re]) => re.test(model))[1];
-    usd += (i * p[0] + o * p[1] + cr * p[2] + cw * p[3]) / 1e6;
-  }
-  return usd;
+// Price row of a collector model key: exact id, then the id without a date suffix (-20251001), else null.
+function priceOf(key) {
+  const [id, tier] = key.split("@"), base = id.replace(/-\d{8}$/, ""), sfx = tier ? "@" + tier : "";
+  return PRICES[id + sfx] ?? PRICES[base + sfx] ?? PRICES[base] ?? null;
 }
+
+// USD of a by-model usage map ({model: [in, out, cache read, write 5m, write 1h]}; an older 4-long row's write
+// counts as 5m). `estimated` is true when some model with usage had no price of its own.
+function costOf(by) {
+  let usd = 0, estimated = false;
+  for (const [key, [i = 0, o = 0, cr = 0, w5 = 0, w1 = 0]] of Object.entries(by ?? {})) {
+    let p = priceOf(key);
+    if (!p) {
+      p = PRICES[FAMILY.find(([re]) => re.test(key))[1]];
+      if (i || o || cr || w5 || w1) estimated = true;
+    }
+    usd += (i * p[0] + o * p[1] + cr * p[2] + w5 * p[3] + w1 * p[4]) / 1e6;
+  }
+  return { usd, estimated };
+}
+const moneyOf = (usd, estimated) => (estimated ? "~" : "") + money(usd);
+const costTip = (estimated) => COST_TIP + (estimated ? ". Estimated: a model here has no list price in the table, so its family's price is used" : "");
 
 // A Windows path as WSL sees it (C:\Users\you -> /mnt/c/Users/you); other paths unchanged.
 function wslPath(p) {
@@ -191,7 +229,7 @@ export default class AgentMetrics extends View {
   }
 
   // Brutalist summary: big mono numbers, thick borders, solid blocks. Turns red and blinks when someone is needed.
-  hero(t, { space, rows, totalUsd, totalTok, cachePct, ctxPct, cfg, needs, waiting, accounts }) {
+  hero(t, { space, rows, totalUsd, totalEst, totalTok, cachePct, ctxPct, cfg, needs, waiting, accounts }) {
     const MONO = "JetBrains Mono";
     // Agent-kind tag: Claude's brand orange, muted; a cool light silver for Codex (the palette's #adc1cc).
     const KIND_CLAUDE = "#c9744f", KIND_CODEX = "#adc1cc";
@@ -219,7 +257,8 @@ export default class AgentMetrics extends View {
             .on_click((_e, cx) => { cx.stop_propagation(); this.view = k; cx.notify(); })
             .child(label);
         })))
-      .child(div().px(10).text_size(42).font_family(MONO).font_black().text_color(fg).truncate().child(money(totalUsd)))
+      .child(div().id("cost-total").px(10).text_size(42).font_family(MONO).font_black().text_color(fg).truncate()
+        .tooltip(costTip(totalEst)).child(moneyOf(totalUsd, totalEst)))
       .child(h_flex().border_t(2).border_color(fg)
         .child(cell(String(rows.length), "AGENTS"))
         .child(cell(fmt(totalTok), "TOKENS"))
@@ -261,9 +300,9 @@ export default class AgentMetrics extends View {
       const s = sess[a.address];
       const u = this.view === "total" ? s : turnOf(s);
       // Codex runs on a ChatGPT plan: no price table applies, so it adds no dollars (its card shows plan use).
-      const usd = u && !isCodex(s) ? cost(u.by_model) : 0;
+      const { usd, estimated: est } = u && !isCodex(s) ? costOf(u.by_model) : { usd: 0, estimated: false };
       const kind = s?.agent ?? kindOfApp(agents().find((x) => x.address === a.address)?.app);
-      return { a, name: a.name, kids, state, s, u, usd, kind };
+      return { a, name: a.name, kids, state, s, u, usd, est, kind };
     });
 
     // Accounts in this space, from each agent's own session; most used first.
@@ -276,7 +315,7 @@ export default class AgentMetrics extends View {
     const accounts = [...tally.values()].sort((x, y) => y.n - x.n);
     const mainAcct = accounts[0]?.name;
     this.anim = rows.some((r) => animated(r.state));
-    const totalUsd = rows.reduce((x, r) => x + r.usd, 0);
+    const totalUsd = rows.reduce((x, r) => x + r.usd, 0), totalEst = rows.some((r) => r.est);
     const totalTok = rows.reduce((x, r) => x + (r.u ? r.u.in + r.u.out + r.u.cache_write : 0), 0);
     // Space-wide cache hit (same formula as a card) and the fullest context among its agents.
     const cs = rows.filter((r) => r.s);
@@ -407,16 +446,28 @@ export default class AgentMetrics extends View {
           .child(s ? bar(r) : div().h(5).border(2).border_color(t.border))
           .child(h_flex().gap(8).items_baseline().text_size(11).font_family(MONO).text_color(t.muted)
             .when(!s, (el) => el.child(div().font_bold().text_color(ink).child("NO DATA")))
-            .when(Boolean(s), (el) => el
-              .child(div().font_bold().text_color(pct >= HIGH ? t.blocked : ink).child(`${fmt(ctx)}/${fmt(win)}`))
-              .child(`⚡${cache}%`)
-              .when(left !== null, (e) => e.child(div().text_color(left <= 10 ? "#b09270" : t.muted).font_bold().child(`~${left > 99 ? "99+" : left}T`)))
-              .child(s.mtime ? age(Date.now() - s.mtime) : "")
-              .child(div().flex_1())
-              .when(!isCodex(s), (e) => e.child(div().text_size(15).font_black().text_color(t.foreground).child(money(r.usd))))
-              .when(isCodex(s), (e) => e.child(div().id(`plan-${r.a.address}`).text_size(15).font_black().text_color(planPct >= 80 ? t.blocked : t.foreground)
+            .when(Boolean(s), (el) => {
+              // Narrow panels: context and cost always show; the secondary items give way first,
+              // elapsed time, then turns left, then cache (estimated mono widths against the room).
+              const ctxTxt = `${fmt(ctx)}/${fmt(win)}`, costTxt = isCodex(s) ? (planPct === null ? "—" : `${planPct}%`) : moneyOf(r.usd, r.est);
+              const extras = [
+                { txt: `⚡${cache}%`, el: div().flex_none().child(`⚡${cache}%`) },
+                left !== null && { txt: `~${left > 99 ? "99+" : left}T`, el: div().flex_none().text_color(left <= 10 ? "#b09270" : t.muted).font_bold().child(`~${left > 99 ? "99+" : left}T`) },
+                s.mtime && { txt: age(Date.now() - s.mtime), el: div().flex_none().child(age(Date.now() - s.mtime)) },
+              ].filter(Boolean);
+              const room = this.width / (settings()?.zoom || 1) - 16 - r.a.depth * 12 - 4 - (r.a.depth > 0 ? 46 : 60) - 16;
+              const wOf = (txt, size) => String(txt).length * size * 0.62;
+              let used = wOf(ctxTxt, 11) + wOf(costTxt, 15) + 8;
+              const keep = extras.filter((x) => { used += 8 + wOf(x.txt, 11); return used <= room; });
+              return el
+              .child(div().flex_none().font_bold().text_color(pct >= HIGH ? t.blocked : ink).child(ctxTxt))
+              .child(h_flex().flex_1().min_w(0).gap(8).items_baseline().overflow_hidden().children(keep.map((x) => x.el)))
+              .when(!isCodex(s), (e) => e.child(div().flex_none().id(`cost-${r.a.address}`).text_size(15).font_black().text_color(t.foreground)
+                .tooltip(costTip(r.est)).child(moneyOf(r.usd, r.est))))
+              .when(isCodex(s), (e) => e.child(div().flex_none().id(`plan-${r.a.address}`).text_size(15).font_black().text_color(planPct >= 80 ? t.blocked : t.foreground)
                 .tooltip(`${plan?.type ? plan.type.toUpperCase() + " plan" : "Plan"}: ${planPct ?? "?"}% of the ${plan?.window_min ? Math.round(plan.window_min / 1440) + "-day" : ""} limit used`)
-                .child(planPct === null ? "—" : `${planPct}%`)))))
+                .child(planPct === null ? "—" : `${planPct}%`)));
+            }))
           .when(Boolean(s?.tool) && active, (el) => el.child(div().truncate().text_size(10.5).font_family(MONO).text_color(hot ? c : t.dim).child(`▸ ${s.tool}`)))
           // Bottom row: the account (only when it is not the main one), small and dim on the left, cut
           // with an ellipsis before it can push the buttons; the buttons stay right-aligned.
@@ -433,7 +484,7 @@ export default class AgentMetrics extends View {
 
     return v_flex().id("metrics-root").size_full().bg(t.chrome).overflow_hidden()
       .on_size_change((size, cx) => { if (Math.abs(size.width - this.width) > 1) { this.width = size.width; cx.notify(); } })
-      .child(this.hero(t, { space, rows, totalUsd, totalTok, cachePct, ctxPct, cfg, needs, waiting, accounts }))
+      .child(this.hero(t, { space, rows, totalUsd, totalEst, totalTok, cachePct, ctxPct, cfg, needs, waiting, accounts }))
       .child(v_flex().id("metrics-list").flex_1().min_h(0).px(8).pb(8).gap(8).overflow_y_scrollbar()
         .when(rows.length === 0, (el) => el.child(div().p(8).text_size(12).text_color(t.dim).child("No agents in this space")))
         .children(rows.map(row)));

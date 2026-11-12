@@ -20,7 +20,10 @@ HOME = os.path.expanduser("~")
 CLAUDE = os.path.join(HOME, ".claude")
 # HERDR_METRICS_CACHE: another cache file, so a test run does not move the live panel's offsets
 CACHE = os.environ.get("HERDR_METRICS_CACHE") or os.path.join(HOME, ".cache", "herdr-metrics.json")
-VERSION = 5     # cache layout; a change makes every transcript be read again
+VERSION = 6     # cache layout; a change makes every transcript be read again
+# Models whose price goes up when one request's prompt (input + cache reads + cache writes) passes a size.
+# Such requests are counted under "<model>@long", priced apart by the mod.
+LONG_PROMPT = {"claude-haiku-5-5": 100_000}
 FLOW = "_flow"  # cache key of the message events (never a session id)
 FLOW_KEEP = 50  # events kept and printed
 SUMMARY_MAX = 60
@@ -65,17 +68,38 @@ def zero():
             "turn": {"in": 0, "out": 0, "cr": 0, "cw": 0, "by": {}}, "v": VERSION}
 
 
+def cache_writes(u):
+    """Cache writes split by TTL: (5 minutes, 1 hour). Without the split, all of it counts as 5 minutes."""
+    cw = u.get("cache_creation_input_tokens", 0) or 0
+    cc = u.get("cache_creation")
+    if not isinstance(cc, dict):
+        return cw, 0
+    w1h = cc.get("ephemeral_1h_input_tokens", 0) or 0
+    w5m = cc.get("ephemeral_5m_input_tokens", 0) or 0
+    return max(w5m, cw - w1h), w1h  # whatever the split leaves out of the total is priced as 5m
+
+
+def price_key(model, prompt):
+    """The model id, plus "@long" for a request priced at the model's long-prompt rate."""
+    limit = LONG_PROMPT.get(model or "")
+    return (model or "?") + ("@long" if limit and prompt > limit else "")
+
+
 def add(st, u, model, sign):
     i, o = u.get("input_tokens", 0), u.get("output_tokens", 0)
-    cr, cw = u.get("cache_read_input_tokens", 0), u.get("cache_creation_input_tokens", 0)
+    cr = u.get("cache_read_input_tokens", 0)
+    w5, w1 = cache_writes(u)
+    cw = w5 + w1
+    key = price_key(model, i + cr + cw)
+    # per model: [input, output, cache read, cache write 5m, cache write 1h]
     st["in"] += sign * i; st["out"] += sign * o; st["cr"] += sign * cr; st["cw"] += sign * cw
-    m = st["cost_by_model"].setdefault(model or "?", [0, 0, 0, 0])
-    m[0] += sign * i; m[1] += sign * o; m[2] += sign * cr; m[3] += sign * cw
+    m = st["cost_by_model"].setdefault(key, [0, 0, 0, 0, 0])
+    m[0] += sign * i; m[1] += sign * o; m[2] += sign * cr; m[3] += sign * w5; m[4] += sign * w1
     # the current turn: everything since the person's last prompt
     t = st["turn"]
     t["in"] += sign * i; t["out"] += sign * o; t["cr"] += sign * cr; t["cw"] += sign * cw
-    m = t["by"].setdefault(model or "?", [0, 0, 0, 0])
-    m[0] += sign * i; m[1] += sign * o; m[2] += sign * cr; m[3] += sign * cw
+    m = t["by"].setdefault(key, [0, 0, 0, 0, 0])
+    m[0] += sign * i; m[1] += sign * o; m[2] += sign * cr; m[3] += sign * w5; m[4] += sign * w1
 
 
 def is_prompt(d):
@@ -147,7 +171,7 @@ def tool_label(c):
 
 
 def scan(path, st, sid=None, events=None):
-    # v5 adds the hc message events, v4 the per-turn usage, v3 the session title: an older cache never saw those lines,
+    # v6 splits cache writes by TTL (5m/1h), v5 adds the hc message events, v4 the per-turn usage, v3 the session title: an older cache never saw those lines,
     # so read the transcript again. Events found are appended to `events`.
     if st.get("v") != VERSION:
         acct = st.get("account")
@@ -612,4 +636,5 @@ def main():
     print(json.dumps({"now": int(time.time() * 1000), "sessions": out, "events": events, "cursor": str(flow["seq"])}))
 
 
-main()
+if __name__ == "__main__":
+    main()
