@@ -141,6 +141,13 @@
                       "content": {
                         "mod": "agent-metrics"
                       }
+                    },
+                    {
+                      "id": "flow",
+                      "type": "block",
+                      "content": {
+                        "mod": "agent-flow"
+                      }
                     }
                   ],
                   "active": "files"

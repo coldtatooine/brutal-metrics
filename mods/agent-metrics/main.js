@@ -4,7 +4,10 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { avatar, animated } from "./avatar.js";
-import { spaces, agents, terminals, panes, exec, hc, appHome, home, window, theme, run } from "herdr";
+import { spaces, agents, terminals, panes, exec, hc, appHome, home, window, theme, run, shared, setShared } from "herdr";
+
+// Feed for the Flow tab (agent-flow): the collector's message events, `to` resolved here by match().
+const FLOW_KEY = "flow.events", FLOW_HEARTBEAT_MS = 15000;
 
 const DISTRO = "Ubuntu";
 const REFRESH_MS = 5000;
@@ -99,12 +102,38 @@ export default class AgentMetrics extends View {
         if (r.code !== 0) throw new Error((r.stderr || "collector failed").split("\n").slice(-2).join(" "));
         this.data = JSON.parse(r.stdout);
         this.error = null;
+        this.publishFlow();
       } catch (e) {
         this.error = String(e?.message ?? e);
+        // The Flow tab falls back to simulated sends while the feed is down.
+        if (shared(FLOW_KEY)?.ok) { this.flowSig = null; setShared(FLOW_KEY, { ok: false, at: Date.now(), error: this.error, events: [] }); }
       }
       this.busy = false;
       cx.notify();
     });
+  }
+
+  // Publishes the collector's events (contract: id, seq, ts, from, from_name, to, to_session, kind, summary)
+  // for agent-flow. The collector knows only the receiver's session; the terminal comes from match(), over
+  // every agent of every space and their live sub-agents. Unresolved events are dropped. Written when the
+  // events change, and at least every FLOW_HEARTBEAT_MS so the Flow tab can tell a live feed from a stale one.
+  publishFlow() {
+    const evs = this.data?.events;
+    if (!Array.isArray(evs)) return;
+    const all = terminals(), list = [];
+    const walk = (addr, depth) => {
+      for (const x of all.filter((x) => x.parent === addr && x.state === "live")) { list.push({ address: x.address, depth }); walk(x.address, depth + 1); }
+    };
+    for (const a of agents()) { list.push({ address: a.address, depth: 0 }); walk(a.address, 1); }
+    const bySession = {};
+    for (const [addr, s] of Object.entries(this.match(list))) bySession[s.session] = addr;
+    const events = evs
+      .map((e) => ({ ...e, to: e.to ?? bySession[e.to_session] ?? null }))
+      .filter((e) => e.from && e.to && e.from !== e.to);
+    const sig = events.map((e) => `${e.id}>${e.to}`).join(",");
+    if (sig === this.flowSig && Date.now() - (this.flowAt ?? 0) < FLOW_HEARTBEAT_MS) return;
+    this.flowSig = sig; this.flowAt = Date.now();
+    setShared(FLOW_KEY, { ok: true, at: this.flowAt, orchestrator: null, events });
   }
 
   // terminal address -> collector session.
@@ -119,11 +148,20 @@ export default class AgentMetrics extends View {
     const titleOf = (addr) => agents().find((a) => a.address === addr)?.title
       || panes().find((p) => p.terminal === addr)?.title
       || terminals().find((x) => x.address === addr)?.title;
-    for (const a of [...list].sort((x, y) => y.depth - x.depth)) {
-      const t = clean(titleOf(a.address));
-      if (!t) continue;
-      const s = sessions.filter((s) => !used.has(s.session) && clean(s.title) === t).sort((x, y) => (y.mtime ?? 0) - (x.mtime ?? 0))[0];
-      if (s) { out[a.address] = s; used.add(s.session); }
+    const norm = (p) => (p ?? "").replaceAll("\\", "/").replace(/^\/\/wsl[.]localhost\/[^/]+/i, "").replace(/\/+$/, "").toLowerCase();
+    const cwds = Object.fromEntries(panes().map((p) => [p.terminal, p.cwd]));
+    const folderOf = (addr) => norm(cwds[addr] ?? terminals().find((x) => x.address === addr)?.cwd);
+    // Two sessions can share a title (two agents named after the same AGENTS.md). Pair title plus folder
+    // first, then title alone, so a terminal in that folder isn't robbed by one elsewhere with the newer mtime.
+    for (const sameFolder of [true, false]) {
+      for (const a of [...list].sort((x, y) => y.depth - x.depth)) {
+        if (out[a.address]) continue;
+        const t = clean(titleOf(a.address)), here = folderOf(a.address);
+        if (!t || (sameFolder && !here)) continue;
+        const s = sessions.filter((s) => !used.has(s.session) && clean(s.title) === t && (!sameFolder || norm(s.cwd) === here))
+          .sort((x, y) => (y.mtime ?? 0) - (x.mtime ?? 0))[0];
+        if (s) { out[a.address] = s; used.add(s.session); }
+      }
     }
     // Terminals started together launch their agents in the same order, so pair them in order:
     // the earliest unused session that started within a minute after each terminal's creation.
@@ -133,11 +171,9 @@ export default class AgentMetrics extends View {
       const s = byStart.find((s) => !used.has(s.session) && s.started - c >= -2000 && s.started - c < 60000);
       if (s) { out[a.address] = s; used.add(s.session); }
     }
-    const norm = (p) => (p ?? "").replaceAll("\\", "/").replace(/^\/\/wsl[.]localhost\/[^/]+/i, "").replace(/\/+$/, "").toLowerCase();
-    const cwds = Object.fromEntries(panes().map((p) => [p.terminal, p.cwd]));
     for (const a of list) {
       if (out[a.address]) continue;
-      const here = norm(cwds[a.address] ?? terminals().find((x) => x.address === a.address)?.cwd);
+      const here = folderOf(a.address);
       const cand = sessions.filter((s) => !used.has(s.session) && here && norm(s.cwd) === here).sort((x, y) => (y.mtime ?? 0) - (x.mtime ?? 0))[0];
       if (cand) { out[a.address] = cand; used.add(cand.session); }
     }

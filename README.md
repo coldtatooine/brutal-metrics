@@ -83,7 +83,17 @@ Your own layout stays as it is. Press `ctrl-shift-l` to switch back.
   - `~/.claude.json` or settings `env`, for the account (email, org or
     credential kind, never a token).
 
-  It keeps read offsets in `~/.cache/herdr-metrics.json`. It makes no
+  From the same transcripts it also picks up the messages agents send each
+  other with `hc send`. Each one arrives as a line starting with
+  `<hc from="tN">`, either as a prompt or absorbed into a running turn. The last
+  50 come out as `events`: `id`, `seq`, `ts`, `from` (the sender's hc
+  address), `from_name`, `to_session` (the receiver's session; the mod maps it
+  to a terminal as `to`), `kind` (`send`) and a one-line `summary` of at most
+  60 characters. The full text of the messages is never kept. A `cursor` comes with them, and
+  `collect.py --since <cursor>` prints only the events after it.
+
+  It keeps read offsets and the last events in `~/.cache/herdr-metrics.json`
+  (`HERDR_METRICS_CACHE` points it at another file, for tests). It makes no
   network requests.
 - The mods run `hc get` and `hc send` (`/COMPACT` and `/CLEAR` send `/compact` and `/clear` to the
   agent). They also run `git status` and a folder listing for the Files
@@ -95,6 +105,12 @@ Your own layout stays as it is. Press `ctrl-shift-l` to switch back.
   `mods/agent-metrics/main.js`. Edit the table to match your models and plan.
 - The panel shows each session's login email. Keep that in mind before you
   share a screenshot.
+- Message events only cover messages that reached a Claude Code agent and were
+  written to its transcript. These are not seen: messages to other programs, sends that never arrived
+  (an agent starting up or blocked), and text typed without an hc tag
+  (including with `notes = false` in hc's config). A tag pasted by hand counts
+  as a message. A message sent while the receiver is busy shows up when the
+  receiver takes it in.
 
 See [RECIPE.md](RECIPE.md) for the full spec, which an agent can use to
 rebuild the layout from scratch.

@@ -5,12 +5,27 @@ Runs inside WSL. Prints one JSON object: one entry per live Claude Code
 session (~/.claude/sessions/<pid>.json), with token totals read incrementally
 from its transcript (~/.claude/projects/<cwd>/<sessionId>.jsonl).
 Read-only on ~/.claude; keeps its own offsets in ~/.cache/herdr-metrics.json.
+
+It also reports messages between agents for the Flow tab: every `hc send` (and every hc note) reaches
+a Claude Code agent as a user line starting with <hc from="tN">, so the receiver's transcript says who
+sent what and when. The last FLOW_KEEP of them come out as "events"; `--since <cursor>` keeps only
+the ones after an earlier run's "cursor".
+
+Usage: collect.py [--since <cursor>] [extra ~/.claude roots...]
 """
 import json, os, glob, re, sys, time
+from datetime import datetime
 
 HOME = os.path.expanduser("~")
 CLAUDE = os.path.join(HOME, ".claude")
-CACHE = os.path.join(HOME, ".cache", "herdr-metrics.json")
+# HERDR_METRICS_CACHE: another cache file, so a test run does not move the live panel's offsets
+CACHE = os.environ.get("HERDR_METRICS_CACHE") or os.path.join(HOME, ".cache", "herdr-metrics.json")
+VERSION = 5     # cache layout; a change makes every transcript be read again
+FLOW = "_flow"  # cache key of the message events (never a session id)
+FLOW_KEEP = 50  # events kept and printed
+SUMMARY_MAX = 60
+# A message delivered by hc: the tag opens the text, possibly inside the wrapper Claude Code puts around long pastes.
+HC_TAG = re.compile(r'^\s*(?:<pasted_content[^>]*>\s*)?<hc from="(t[0-9a-z]+)(?: ([^"]*))?"[^>]*>(.*?)(?:</hc>|$)', re.S)
 
 
 def load_cache():
@@ -47,7 +62,7 @@ def zero():
     return {"off": 0, "in": 0, "out": 0, "cr": 0, "cw": 0, "turns": 0, "tools": 0,
             "model": None, "ctx": 0, "last_id": None, "last": None, "cost_by_model": {},
             "base": 0, "hist": [], "tool": None, "title": None, "custom": None,
-            "turn": {"in": 0, "out": 0, "cr": 0, "cw": 0, "by": {}}, "v": 4}
+            "turn": {"in": 0, "out": 0, "cr": 0, "cw": 0, "by": {}}, "v": VERSION}
 
 
 def add(st, u, model, sign):
@@ -73,6 +88,46 @@ def is_prompt(d):
     return isinstance(c, list) and any(isinstance(x, dict) and x.get("type") in ("text", "image") for x in c)
 
 
+def prompt_text(d):
+    c = (d.get("message") or {}).get("content")
+    if isinstance(c, str):
+        return c
+    return "".join(x.get("text", "") for x in c if isinstance(x, dict) and x.get("type") == "text") if isinstance(c, list) else ""
+
+
+def epoch_ms(iso):
+    try:
+        return int(datetime.fromisoformat(str(iso).replace("Z", "+00:00")).timestamp() * 1000)
+    except Exception:
+        return None
+
+
+def hc_event(d, sid):
+    """The message event of a transcript line that hc delivered, or None. Only a short one-line summary is kept.
+
+    A message reaches the agent in one of two ways: as a prompt (a user line), or, when it arrives while the
+    agent is working, absorbed into the running turn (an attachment line of type queued_command)."""
+    if d.get("isSidechain"):
+        return None
+    if d.get("type") == "attachment":
+        a = d.get("attachment") or {}
+        if a.get("type") != "queued_command" or not isinstance(a.get("prompt"), str):
+            return None
+        text = a["prompt"]
+    elif is_prompt(d):
+        text = prompt_text(d)
+    else:
+        return None
+    m = HC_TAG.match(text)
+    ts = epoch_ms(d.get("timestamp"))
+    if not m or ts is None or not d.get("uuid"):
+        return None
+    text = " ".join(m.group(3).split())
+    summary = text if len(text) <= SUMMARY_MAX else text[: SUMMARY_MAX - 1].rstrip() + "…"
+    return {"id": f"{sid}:{d['uuid']}", "ts": ts, "from": m.group(1), "from_name": m.group(2) or None,
+            "to": None, "to_session": sid, "kind": "send", "summary": summary}
+
+
 def tool_label(c):
     """A short 'Edit main.js' / 'Bash npm test' for a tool_use block."""
     name, inp = c.get("name") or "tool", c.get("input") or {}
@@ -86,9 +141,10 @@ def tool_label(c):
     return (name + " " + target).strip()
 
 
-def scan(path, st):
-    # v4 adds the per-turn usage; v3 added the session title: an older cache never saw those lines, so read the transcript again.
-    if st.get("v") != 4:
+def scan(path, st, sid=None, events=None):
+    # v5 adds the hc message events, v4 the per-turn usage, v3 the session title: an older cache never saw those lines,
+    # so read the transcript again. Events found are appended to `events`.
+    if st.get("v") != VERSION:
         acct = st.get("account")
         st.clear(); st.update(zero())
         if acct:
@@ -119,6 +175,14 @@ def scan(path, st):
             except Exception:
                 pass
             continue
+        # a message from another agent, as a prompt or absorbed mid-turn (its quotes are escaped in the JSON line)
+        if events is not None and b'<hc from=\\"' in line:
+            try:
+                ev = hc_event(json.loads(line), sid)
+                if ev:
+                    events.append(ev)
+            except Exception:
+                pass
         user = b'"type":"user"' in line and b'"tool_result"' not in line
         if not user and b'"usage"' not in line and b'"tool_use"' not in line:
             continue
@@ -282,12 +346,47 @@ def account_of(native, root, pid, cwd):
     return None
 
 
+def parse_args(argv):
+    """(since, extra roots). An unknown or missing cursor counts as none: every kept event is printed."""
+    since, rest, i = 0, [], 0
+    while i < len(argv):
+        if argv[i] == "--since":
+            try:
+                since = int(argv[i + 1])
+            except (IndexError, ValueError):
+                since = 0
+            i += 2
+            continue
+        rest.append(argv[i])
+        i += 1
+    return since, rest
+
+
+def add_events(flow, found):
+    """New events get the next sequence numbers, oldest first; ones already kept (a transcript read again) are skipped."""
+    known = {e["id"] for e in flow["events"]}
+    for ev in sorted(found, key=lambda e: e["ts"]):
+        if ev["id"] in known:
+            continue
+        flow["seq"] += 1
+        ev["seq"] = flow["seq"]
+        flow["events"].append(ev)
+        known.add(ev["id"])
+    flow["events"] = sorted(flow["events"], key=lambda e: (e["ts"], e["seq"]))[-FLOW_KEEP:]
+
+
 def main():
     cache = load_cache()
+    flow = cache.pop(FLOW, None)
+    if not isinstance(flow, dict) or flow.get("v") != VERSION:
+        # keep counting from the old cursor, so a reader's --since never points past the new events
+        flow = {"v": VERSION, "seq": flow.get("seq", 0) if isinstance(flow, dict) else 0, "events": []}
+    found = []
     out = []
+    since, extra = parse_args(sys.argv[1:])
     # Native root (this WSL's ~/.claude) plus any extra roots given as arguments
     # (e.g. /mnt/c/Users/<you>/.claude for Claude Code running on Windows).
-    roots = [(CLAUDE, True)] + [(r, False) for r in sys.argv[1:] if os.path.isdir(r)]
+    roots = [(CLAUDE, True)] + [(r, False) for r in extra if os.path.isdir(r)]
     entries = [(root, native, p) for root, native in roots for p in glob.glob(os.path.join(root, "sessions", "*.json"))]
     for root, native, p in entries:
         try:
@@ -307,7 +406,7 @@ def main():
         mtime = None
         if tp:
             try:
-                scan(tp, st)
+                scan(tp, st, sid, found)
                 mtime = int(os.path.getmtime(tp) * 1000)
             except Exception as e:
                 print(f"scan {sid}: {e}", file=sys.stderr)
@@ -324,8 +423,11 @@ def main():
     for k in list(cache):
         if k not in live:
             del cache[k]
+    add_events(flow, found)
+    cache[FLOW] = flow
     save_cache(cache)
-    print(json.dumps({"now": int(time.time() * 1000), "sessions": out}))
+    events = [e for e in flow["events"] if e["seq"] > since]
+    print(json.dumps({"now": int(time.time() * 1000), "sessions": out, "events": events, "cursor": str(flow["seq"])}))
 
 
 main()
