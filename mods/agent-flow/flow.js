@@ -7,15 +7,21 @@
 //      +--> [ agent 2 ]   |  lane     one lane on the right per pair of agents that messaged each other
 //      +--> [ agent 3 ]<--+
 export const PAD = 8;
-const TRUNK_DX = 12, STUB = 16, LANE_PAD = 10, LANE_GAP = 6, COS_H = 64, MAX_LANES = 4;
-const NODE_H = 52, NODE_GAP = 10, COMPACT_H = 40, COMPACT_GAP = 8;
+const TRUNK_DX = 12, STUB = 16, LANE_PAD = 10, LANE_GAP = 6, MAX_LANES = 4;
+// Inner vertical padding of the boxes' text (top and bottom); the heights include it, so every line,
+// pulse and edge that hangs off a box (mid height, bottom) follows.
+export const COS_PAD_Y = 10, NODE_PAD_Y = 8, COMPACT_PAD_Y = 6;
+// Content heights: name row 16 + title ~14 + MSGS row ~28 (+ gaps) for the orchestrator; name 16 +
+// title ~14 + code row ~17 for a node; name + code row for a compact node. Plus the border.
+const COS_H = 68 + 2 * COS_PAD_Y;
+const NODE_H = 56 + 2 * NODE_PAD_Y, NODE_GAP = 10, COMPACT_H = 42 + 2 * COMPACT_PAD_Y, COMPACT_GAP = 8;
 
 const key = (a, b) => (a < b ? `${a}|${b}` : `${b}|${a}`);
 
 export const lengthOf = (a, b) => Math.abs(b.x - a.x) + Math.abs(b.y - a.y);
 
 // width/height: the panel; others: agent addresses top to bottom; events: oldest first.
-export function plan({ width, height, orchestrator, others, events, now, hotMs }) {
+export function plan({ width, height, orchestrator, others, events }) {
   const idx = new Map(others.map((a, i) => [a, i]));
   // Peer pairs, most recent last; only the last MAX_LANES keep a lane.
   const peers = [];
@@ -60,16 +66,9 @@ export function plan({ width, height, orchestrator, others, events, now, hotMs }
   }
   for (const k of lanes) { const [a, b] = k.split("|"); lines.push(route(a, b)); }
 
-  // Hot edges: the latest send on each edge within hotMs, in its direction (sender to receiver).
-  const hot = new Map();
-  for (const e of events) {
-    if (now - e.ts > hotMs) continue;
-    const pts = route(e.from, e.to);
-    if (pts) hot.set(key(e.from, e.to), pts);
-  }
-
   return {
-    cos, boxes, compact: !roomy, wide: width >= 520, lines, hot: [...hot.values()], route,
+    cos, boxes, compact: !roomy, wide: width >= 520, lines, route,
+    padY: roomy ? NODE_PAD_Y : COMPACT_PAD_Y, cosPadY: COS_PAD_Y,
     height: (n ? boxes[n - 1].y + NH : cos.y + cos.h) + PAD,
   };
 }

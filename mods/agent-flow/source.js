@@ -11,8 +11,6 @@ import { shared } from "herdr";
 export const MODE = "shared";
 const STALE_MS = 40000;
 export const KEY = "flow.events";
-// Who orchestrates when nothing better says so (no `role=orchestrator` label, no published value).
-export const ORCHESTRATOR_HINT = "t24";
 const WINDOW = 50, SUMMARY = 60;
 
 const SAMPLES = [
@@ -74,27 +72,14 @@ export function withKinds(evs) {
   });
 }
 
-const roleOf = (labels) => (Array.isArray(labels) ? labels.find((l) => /^role=/.test(l))?.slice(5) : labels?.role);
+export const roleOf = (labels) => (Array.isArray(labels) ? labels.find((l) => /^role=/.test(l))?.slice(5) : labels?.role);
 
-// The orchestrator: published value, then an hc label role=orchestrator, then (mock) the hint,
-// then the node that sent to the most distinct agents, then the hint, then the first node.
-export function orchestratorOf(nodes, evs) {
+// The orchestrator: a published value, else the terminal labelled role=orchestrator
+// (`hc label t24 role=orchestrator`), else the first node.
+export function orchestratorOf(nodes) {
   const addrs = new Set(nodes.map((n) => n.address));
-  const real = live();
-  const pub = real ? feed().orchestrator : null;
+  const pub = live() ? feed().orchestrator : null;
   if (pub && addrs.has(pub)) return pub;
   const labeled = nodes.find((n) => roleOf(n.labels) === "orchestrator");
-  if (labeled) return labeled.address;
-  if (!real && addrs.has(ORCHESTRATOR_HINT)) return ORCHESTRATOR_HINT;
-  const outs = new Map();
-  for (const e of evs) {
-    if (!addrs.has(e.from) || !e.to) continue;
-    if (!outs.has(e.from)) outs.set(e.from, new Set());
-    outs.get(e.from).add(e.to);
-  }
-  let best = null, most = 0;
-  for (const [a, s] of outs) if (s.size > most) { best = a; most = s.size; }
-  if (best) return best;
-  if (addrs.has(ORCHESTRATOR_HINT)) return ORCHESTRATOR_HINT;
-  return nodes[0]?.address ?? null;
+  return labeled?.address ?? nodes[0]?.address ?? null;
 }

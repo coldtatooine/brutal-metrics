@@ -35,12 +35,16 @@ function slidingEdge(w, h) {
       ? v_flex().absolute().left(0).top(0).w(EDGE).h(count * F).children(facets).loop("top", motion)
       : h_flex().absolute().left(0).top(0).h(EDGE).w(count * F).children(facets).loop("left", motion);
   };
-  const edge = (x, y, ew, eh, vertical, reverse) => div().absolute().left(x).top(y).w(ew).h(eh).overflow_hidden().child(strip(vertical ? eh : ew, vertical, reverse));
-  return div().absolute().inset_0().overflow_hidden()
-    .child(edge(0, 0, w, EDGE, false, false))
-    .child(edge(w - EDGE, 0, EDGE, h, true, false))
-    .child(edge(0, h - EDGE, w, EDGE, false, true))
-    .child(edge(0, 0, EDGE, h, true, true));
+  // Each edge is anchored to the overlay's sides (top/right/bottom/left), not placed by w and h, so it
+  // lands on the box's real edge whatever its border or the zoom. w and h only size the strips (longer
+  // than needed is fine: the edge clips). Top and bottom run the full width, so the corners are covered.
+  const across = (el) => el.left(0).right(0).h(EDGE).overflow_hidden();
+  const along = (el) => el.top(0).bottom(0).w(EDGE).overflow_hidden();
+  return div().absolute().inset_0()
+    .child(across(div().absolute().top(0)).child(strip(w + 8, false, false)))
+    .child(along(div().absolute().right(0)).child(strip(h + 8, true, false)))
+    .child(across(div().absolute().bottom(0)).child(strip(w + 8, false, true)))
+    .child(along(div().absolute().left(0)).child(strip(h + 8, true, true)));
 }
 
 // B: the Metrics/Agents border, stepping one facet per tick.
