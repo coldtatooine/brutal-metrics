@@ -28,9 +28,14 @@ plan use (Codex) and tokens, and how full its context window is.
 - **Pixel-art avatars**: each agent gets a random sprite, the same in the
   sidebar and in the panel. Active agents' avatars animate, and working agents
   get a moving rainbow border.
+- **Flow tab**: a vertical flowchart of the messages the agents send each
+  other with `hc send`. The orchestrator sits on top, linked to every agent;
+  a pulse runs from sender to receiver on each message, and the route stays
+  lit for a few seconds. Each node shows the status, the terminal code and
+  how many messages it sent and received.
 - **Files panel**: a lazy file tree of the focused pane's folder, with git
   status marks and a read-only preview.
-- **Files** and **Metrics** buttons in the tab bar open the side panel. Each
+- **Files**, **Metrics** and **Flow** buttons in the tab bar open the side panel. Each
   space remembers which one was open.
 
 ## Install
@@ -44,7 +49,7 @@ Read ~/.config/herdr-app/AGENTS.md, then add this layout: https://github.com/col
 To install it by hand:
 
 1. Copy `layouts/brutal-metrics.json` to `~/.config/herdr-app/layouts/`.
-2. Copy the four folders in `mods/` to `~/.config/herdr-app/mods/`.
+2. Copy the five folders in `mods/` (`agent-metrics`, `agents-metrics`, `tabs-metrics`, `files-metrics`, `agent-flow`) to `~/.config/herdr-app/mods/`.
 3. Switch to the layout with `ctrl-shift-l`, or run
    `herdr-app do layout.switch '{"name":"brutal-metrics"}'`.
 
