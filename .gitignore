@@ -1,0 +1,3 @@
+# Editor files Herdr generates inside each mod; not part of the layout
+mods/*/gpui-kit.d.ts
+mods/*/jsconfig.json
