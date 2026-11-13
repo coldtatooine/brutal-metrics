@@ -91,6 +91,7 @@ function wslPath(p) {
   const u = p.replaceAll("\\", "/"), m = u.match(/^([A-Za-z]):\/(.*)$/);
   return m ? `/mnt/${m[1].toLowerCase()}/${m[2]}` : u;
 }
+const STUCK_MS = 60000; // a collector run older than this is treated as hung
 const scriptPath = () => wslPath(appHome()) + "/mods/agent-metrics/collect.py";
 
 // Low-poly rainbow border for a working agent's card: flat rainbow facets, alternately lit and shaded,
@@ -129,19 +130,26 @@ export default class AgentMetrics extends View {
   }
 
   refresh(cx) {
-    if (this.busy) return;
+    // A run that hangs (hc or exec never answers) must not freeze the numbers for good: after STUCK_MS the
+    // next tick starts a new run, and the stale one is ignored when it finally ends.
+    if (this.busy && Date.now() - this.busySince < STUCK_MS) return;
     this.busy = true;
+    this.busySince = Date.now();
+    const run = (this.run = (this.run ?? 0) + 1);
     cx.spawn(async (cx) => {
+      // cx.sleep is the runtime's timer (there is no setTimeout in a mod).
+      const within = (p, ms) => Promise.race([p, cx.sleep(ms).then(() => { throw new Error("timeout"); })]);
       try {
         for (const a of terminals().filter((x) => x.state === "live")) {
           if (this.created[a.address]) continue;
-          try { this.created[a.address] = JSON.parse((await hc(["get", a.address, "--json"])).stdout).created_ms ?? 0; }
+          try { this.created[a.address] = JSON.parse((await within(hc(["get", a.address, "--json"]), 10000)).stdout).created_ms ?? 0; }
           catch (e) { this.created[a.address] = 0; }
         }
         const win = window()?.platform === "windows";
-        const r = win
-          ? await exec("wsl.exe", ["-d", DISTRO, "python3", scriptPath(), wslPath(home()) + "/.claude"])
-          : await exec("python3", [scriptPath(), home() + "/.claude"]);
+        const r = await within(win
+          ? exec("wsl.exe", ["-d", DISTRO, "python3", scriptPath(), wslPath(home()) + "/.claude"])
+          : exec("python3", [scriptPath(), home() + "/.claude"]), 40000);
+        if (run !== this.run) return;
         if (r.code !== 0) throw new Error((r.stderr || "collector failed").split("\n").slice(-2).join(" "));
         this.data = JSON.parse(r.stdout);
         this.error = null;
@@ -151,7 +159,7 @@ export default class AgentMetrics extends View {
         // The Flow tab falls back to simulated sends while the feed is down.
         if (shared(FLOW_KEY)?.ok) { this.flowSig = null; setShared(FLOW_KEY, { ok: false, at: Date.now(), error: this.error, events: [] }); }
       }
-      this.busy = false;
+      if (run === this.run) this.busy = false;
       cx.notify();
     });
   }
@@ -282,13 +290,23 @@ export default class AgentMetrics extends View {
     // Agents shown in this space, then their sub-agents (terminals an agent started), indented under them.
     const top = agents().filter((a) => a.space === space?.id);
     const list = [];
+    // One card per terminal: `agents()` also lists sub-agents, which walk() already nests under their parent.
+    const placed = new Set();
+    const nested = new Set();
+    const under = (addr, seen) => {
+      for (const x of all.filter((x) => x.parent === addr && x.state === "live" && !seen.has(x.address))) { seen.add(x.address); nested.add(x.address); under(x.address, seen); }
+    };
+    for (const a of top) under(a.address, new Set([a.address]));
     const walk = (addr, depth) => {
-      for (const x of all.filter((x) => x.parent === addr && x.state === "live")) {
+      for (const x of all.filter((x) => x.parent === addr && x.state === "live" && !placed.has(x.address))) {
+        placed.add(x.address);
         list.push({ address: x.address, status: x.status, focused: false, depth, name: x.name });
         walk(x.address, depth + 1);
       }
     };
     for (const a of top) {
+      if (nested.has(a.address) || placed.has(a.address)) continue;
+      placed.add(a.address);
       list.push({ address: a.address, status: a.status, focused: a.focused, depth: 0, name: all.find((x) => x.address === a.address)?.name || a.title || a.address });
       walk(a.address, 1);
     }

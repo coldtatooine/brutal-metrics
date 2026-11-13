@@ -52,7 +52,11 @@ export default class AgentFlow extends View {
     const tabNames = new Map();
     for (const s of spaces()) for (const tb of s.tabs ?? []) tabNames.set(tb.id, tb.name);
     const list = [];
+    // One node per terminal, ever: `agents()` also lists sub-agents, which walk() places under their parent.
+    const placed = new Set();
     const add = (x, a, depth) => {
+      if (placed.has(x?.address ?? a.address)) return;
+      placed.add(x?.address ?? a.address);
       const labels = x?.labels ?? {};
       // Only a top-level agent owns its tab; a sub-agent in the same tab would take its parent's name.
       const tab = depth === 0 ? tabNames.get(labels["herdr.tab"]) : null;
@@ -65,7 +69,14 @@ export default class AgentFlow extends View {
     const walk = (addr, depth) => {
       for (const x of all.filter((x) => x.parent === addr && x.state === "live")) { add(x, null, depth); walk(x.address, depth + 1); }
     };
-    for (const a of agents().filter((a) => a.space === space?.id)) { add(term(a.address), a, 0); walk(a.address, 1); }
+    const here0 = agents().filter((a) => a.space === space?.id);
+    // Addresses that sit under some agent of this space (any depth): they are drawn nested, not as top-level nodes.
+    const nested = new Set();
+    const under = (addr, seen) => {
+      for (const x of all.filter((x) => x.parent === addr && x.state === "live" && !seen.has(x.address))) { seen.add(x.address); nested.add(x.address); under(x.address, seen); }
+    };
+    for (const a of here0) under(a.address, new Set([a.address]));
+    for (const a of here0) { if (nested.has(a.address)) continue; add(term(a.address), a, 0); walk(a.address, 1); }
     for (const n of list) {
       const busyKids = all.filter((x) => x.parent === n.address && x.state === "live" && (x.status === "working" || x.status === "blocked")).length;
       n.kids = busyKids;
