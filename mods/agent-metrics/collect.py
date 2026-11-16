@@ -545,6 +545,215 @@ def codex_sessions(homes, cache, found):
     return out
 
 
+# ---- omp --------------------------------------------------------------------------------------------
+# omp keeps one JSONL per session: ~/.omp/agent/sessions/<cwd>/<start>_<id>.jsonl. Its lines: session (id, cwd),
+# title / title_change, model_change, message (role user | assistant | toolResult). An assistant message carries
+# usage {input, output, cacheRead, cacheWrite, cttl, cost.total} and toolCall blocks. Read-only, like the rest.
+# Which session a running omp has: the file it holds open, else the crumb it leaves for its terminal
+# (terminal-sessions/pts-N: cwd, session path), trusted only when written after the process started.
+# The session's "pid" is the omp process, which is what the terminal reports as its foreground program.
+OMP_V = "omp2"      # cache layout of an omp entry
+OMP_ROOT = os.path.join(HOME, ".omp", "agent")
+OMP_WINDOWS = "_omp_windows"  # cache key of the context windows read from models.db (never a session id)
+OMP_LINE = re.compile(rb'^\{"type":"([a-z_]+)"')
+
+
+def omp_zero():
+    return {"v": OMP_V, "off": 0, "id": None, "cwd": None, "title": None, "provider": None, "model": None,
+            "in": 0, "out": 0, "cr": 0, "cw": 0, "usd": 0.0, "by": {}, "turns": 0, "tools": 0, "ctx": 0, "base": 0,
+            "hist": [], "tool": None, "hint": None, "turn": {"in": 0, "out": 0, "cr": 0, "cw": 0, "by": {}}}
+
+
+def omp_tool(c):
+    """A short 'read main.js' / 'bash npm test' for a toolCall block."""
+    name, a = c.get("name") or "tool", c.get("arguments")
+    a = a if isinstance(a, dict) else {}
+    path = a.get("path") or a.get("file_path")
+    if isinstance(path, str) and path:
+        target = path.replace("\\", "/").rstrip("/").split("/")[-1]
+    else:
+        target = " ".join(str(a.get("command") or a.get("pattern") or a.get("query") or a.get("url") or "").split())[:40]
+    return (name + " " + target).strip()
+
+
+def omp_add(st, u, model):
+    i, o = u.get("input", 0) or 0, u.get("output", 0) or 0
+    cr, cw = u.get("cacheRead", 0) or 0, u.get("cacheWrite", 0) or 0
+    w1 = min(cw, (u.get("cttl") or {}).get("ephemeral1h", 0) or 0)
+    w5 = cw - w1
+    st["in"] += i; st["out"] += o; st["cr"] += cr; st["cw"] += cw
+    st["usd"] += (u.get("cost") or {}).get("total", 0) or 0
+    t = st["turn"]
+    t["in"] += i; t["out"] += o; t["cr"] += cr; t["cw"] += cw
+    # per model: [input, output, cache read, cache write 5m, cache write 1h]
+    for m in (st["by"].setdefault(model, [0] * 5), t["by"].setdefault(model, [0] * 5)):
+        m[0] += i; m[1] += o; m[2] += cr; m[3] += w5; m[4] += w1
+
+
+def scan_omp(path, st):
+    if st.get("v") != OMP_V or os.path.getsize(path) < st["off"]:
+        st.clear(); st.update(omp_zero())
+    with open(path, "rb") as f:
+        f.seek(st["off"])
+        data = f.read()
+    end = data.rfind(b"\n")  # only consume whole lines
+    if end < 0:
+        return
+    st["off"] += end + 1
+    for line in data[: end + 1].split(b"\n"):
+        m = OMP_LINE.match(line)
+        if not m:
+            continue
+        kind = m.group(1)
+        try:
+            if kind == b"message":
+                if b'"role":"assistant"' not in line and b'"role":"user"' not in line:
+                    continue
+                msg = json.loads(line).get("message")
+                if not isinstance(msg, dict):
+                    continue
+                if msg.get("role") == "user":
+                    # a new turn starts with what the person typed; steering sent mid-turn and injected lines do not
+                    if not msg.get("synthetic") and not msg.get("steering"):
+                        st["turn"] = {"in": 0, "out": 0, "cr": 0, "cw": 0, "by": {}}
+                    continue
+                for c in msg.get("content") or []:
+                    if isinstance(c, dict) and c.get("type") == "toolCall":
+                        st["tools"] += 1
+                        st["tool"] = omp_tool(c)
+                u = msg.get("usage")
+                if not isinstance(u, dict) or not (u.get("totalTokens") or 0):
+                    continue  # an aborted or failed request
+                raw = msg.get("model") or "?"
+                model = re.sub(r"\[[^\]]*\]$", "", raw)  # "claude-opus-5-5[1m]": the bracket names the long-context variant
+                omp_add(st, u, model)
+                st["turns"] += 1
+                st["model"], st["provider"] = model, msg.get("provider") or st["provider"]
+                st["hint"] = 1_000_000 if raw.endswith("[1m]") else None
+                st["ctx"] = (u.get("input", 0) or 0) + (u.get("cacheRead", 0) or 0) + (u.get("cacheWrite", 0) or 0)
+                st["base"] = st["base"] or st["ctx"]  # first request: system prompt, tools, rules, skills, MCP
+                st["hist"] = (st["hist"] + [st["ctx"]])[-24:]
+            elif kind == b"session":
+                d = json.loads(line)
+                st["id"], st["cwd"] = d.get("id"), d.get("cwd")
+            elif kind in (b"title", b"title_change"):
+                st["title"] = json.loads(line).get("title") or st["title"]
+        except Exception:
+            continue
+
+
+def omp_live():
+    """(pid, session file, start ms) of every omp running in a terminal of this machine."""
+    try:
+        with open("/proc/stat") as f:
+            btime = next(int(l.split()[1]) for l in f if l.startswith("btime"))
+        hz = os.sysconf("SC_CLK_TCK")
+    except Exception:
+        return []
+    sessions_dir = os.path.join(OMP_ROOT, "sessions") + os.sep
+    out = []
+    for d in glob.glob("/proc/[0-9]*"):
+        try:
+            with open(d + "/comm") as f:
+                if f.read().strip() != "omp":
+                    continue
+            tty = os.readlink(d + "/fd/0")
+            with open(d + "/stat") as f:
+                s = f.read()
+            start = btime + int(s[s.rindex(")") + 2:].split()[19]) / hz
+        except Exception:
+            continue
+        if not tty.startswith("/dev/pts/"):
+            continue  # omp's own daemons have no terminal
+        path = None
+        try:
+            for fd in os.listdir(d + "/fd"):
+                p = os.readlink(f"{d}/fd/{fd}")
+                # a session file, not a sub-agent's artifact folder beneath it
+                if p.startswith(sessions_dir) and p.endswith(".jsonl") and p[len(sessions_dir):].count("/") == 1:
+                    path = p
+                    break
+        except OSError:
+            pass
+        if not path:
+            crumb = os.path.join(OMP_ROOT, "terminal-sessions", "pts-" + tty.rsplit("/", 1)[1])
+            try:
+                with open(crumb) as f:
+                    lines = f.read().split("\n")
+                if os.path.getmtime(crumb) >= start - 5 and len(lines) > 1 and os.path.exists(lines[1]):
+                    path = lines[1]
+            except OSError:
+                pass
+        if path:
+            out.append((int(os.path.basename(d)), path, int(start * 1000)))
+    return out
+
+
+def omp_window(provider, model, windows):
+    """The model's context window from omp's model cache, or None (the mod then infers it). A miss is asked
+    again only after models.db changed."""
+    db = os.path.join(OMP_ROOT, "models.db")
+    try:
+        stamp = int(os.path.getmtime(db))
+    except OSError:
+        return None
+    key = f"{provider}/{model}"
+    hit = windows.get(key)
+    if hit and (hit[0] or hit[1] == stamp):
+        return hit[0]
+    w = None
+    try:
+        import sqlite3
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=1)
+        try:
+            row = con.execute("select models from model_cache where provider_id = ? order by updated_at desc limit 1", (provider,)).fetchone()
+        finally:
+            con.close()
+        if row:
+            w = next((x.get("contextWindow") for x in json.loads(row[0]) if isinstance(x, dict) and x.get("id") == model), None)
+    except Exception as e:
+        print(f"omp window {key}: {e}", file=sys.stderr)
+    windows[key] = [w, stamp]
+    return w
+
+
+def omp_config(cwd):
+    """What omp has configured for the folder: the project's MCP servers, and the user's extensions as plugins.
+    omp's hooks are not read, so they count as none."""
+    mcp = set()
+    if cwd:
+        for n in (".mcp.json", "mcp.json"):
+            mcp.update(mcp_names(read_json(os.path.join(cwd, n))))
+    ext = os.path.join(OMP_ROOT, "extensions")
+    plugins = sorted("omp:" + os.path.splitext(n)[0] for n in os.listdir(ext)) if os.path.isdir(ext) else []
+    return {"mcp": sorted("omp:" + m for m in mcp), "hooks": [], "plugins": plugins}
+
+
+def omp_sessions(cache, windows):
+    out, seen = [], set()
+    for pid, path, start in omp_live():
+        key = "omp:" + os.path.basename(path)
+        st = cache.setdefault(key, omp_zero())
+        try:
+            scan_omp(path, st)
+            mtime = int(os.path.getmtime(path) * 1000)
+        except Exception as e:
+            print(f"scan {path}: {e}", file=sys.stderr)
+            continue
+        if not st["id"] or st["id"] in seen:
+            continue
+        seen.add(st["id"])
+        model, provider = st["model"] or "omp", st["provider"]
+        out.append({"agent": "omp", "cache_key": key, "pid": pid, "session": st["id"], "cwd": st["cwd"], "started": start, "mtime": mtime,
+                    "account": {"kind": "provider", "label": (provider or "OMP").upper(), "email": None, "org": None},
+                    "in": st["in"], "out": st["out"], "cache_read": st["cr"], "cache_write": st["cw"],
+                    "turn": st["turn"], "turns": st["turns"], "tools": st["tools"], "model": st["model"], "ctx": st["ctx"],
+                    "base": st["base"], "hist": st["hist"], "tool": st["tool"], "by_model": st["by"], "cost_usd": st["usd"],
+                    "window": st["hint"] or (omp_window(provider, model, windows) if provider and st["model"] else None),
+                    "title": st["title"], "config": omp_config(st["cwd"])})
+    return out
+
+
 def parse_args(argv):
     """(since, extra roots). An unknown or missing cursor counts as none: every kept event is printed."""
     since, rest, i = 0, [], 0
@@ -624,6 +833,9 @@ def main():
         if os.path.isdir(os.path.join(h, "sessions")) and h not in homes:
             homes.append(h)
     out += codex_sessions(homes, cache, found)
+    windows = cache.pop(OMP_WINDOWS, None)
+    windows = windows if isinstance(windows, dict) else {}
+    out += omp_sessions(cache, windows)
     # forget sessions that are gone
     live = {o.get("cache_key") or o["session"] for o in out}
     for k in list(cache):
@@ -631,6 +843,7 @@ def main():
             del cache[k]
     add_events(flow, found)
     cache[FLOW] = flow
+    cache[OMP_WINDOWS] = windows
     save_cache(cache)
     events = [e for e in flow["events"] if e["seq"] > since]
     print(json.dumps({"now": int(time.time() * 1000), "sessions": out, "events": events, "cursor": str(flow["seq"])}))

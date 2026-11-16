@@ -1,7 +1,7 @@
 # Brutal Metrics
 
 A [Herdr](https://herdr.dev) layout with a brutalist metrics panel. It shows
-what each Claude Code or Codex agent in a space is doing: tokens, cache, plan
+what each Claude Code, Codex or omp agent in a space is doing: tokens, cache, plan
 use (Codex), and how full its context window is. No financial cost is shown.
 
 ![Brutal Metrics](preview.png)
@@ -16,7 +16,7 @@ use (Codex), and how full its context window is. No financial cost is shown.
   - `CTX MAX`, the fullest context window among the agents (tinted from 80%);
   - `PLUGINS`, `MCP` and `HOOKS`, the configured items across the agents.
 - **One card per agent**, with sub-agents nested under it:
-  - a `CLAUDE` or `CODEX` tag;
+  - a `CLAUDE`, `CODEX` or `OMP` tag;
   - a thin 24-segment context bar split into base (system prompt, tools,
     MCP), conversation and free space;
   - the context size against the window size, the cache hit rate, an
@@ -107,10 +107,19 @@ Your own layout stays as it is. Press `ctrl-shift-l` to switch back.
     `DISTRO = "Ubuntu"` in `mods/agent-metrics/main.js`, so edit that if
     yours has another name.
   - On other systems it runs with `python3`.
-- **Claude Code** or **Codex CLI**: other agents appear but show `NO DATA`.
+- **Claude Code**, **Codex CLI** or **[omp](https://github.com/can1357/oh-my-pi)**: other agents appear but show `NO DATA`.
   Codex is found next to Claude's folder (`~/.codex` beside `~/.claude`, on
   Windows or in WSL). Only threads started in the last 7 days and active in
-  the last 2 are read.
+  the last 2 are read. omp agents are the running `omp` processes of the
+  machine, each with the session file it holds open (or, failing that, the one
+  its terminal's `terminal-sessions` entry names).
+- **Other machines**: for each machine whose spaces are open (`hc machine add`),
+  the mod runs `collect.py` there through herdr-core and keeps its sessions
+  apart. That machine needs `python3`; nothing is installed on it, the script
+  is sent each time. It reads that machine's own `~/.claude`, `~/.codex` and
+  `~/.omp`. Only omp on a remote machine has been tried; Claude Code and Codex
+  there use the same code but are untested. The message events for the Flow tab
+  still come from this computer only.
 
 ## What it reads and runs
 
@@ -128,6 +137,14 @@ Your own layout stays as it is. Press `ctrl-shift-l` to switch back.
   - `session_index.jsonl` for thread names, and `config.toml` and
     `hooks.json` to count plugins, MCP servers and hooks. It never reads
     `auth.json`. The account shown is the plan type from the rollout.
+- It reads these omp files, without changing them:
+  - the session files `~/.omp/agent/sessions/<folder>/*.jsonl`, for the
+    folder, title, model, token totals (input, output, cache read and write),
+    the tool in use and what omp itself says each request cost;
+  - `~/.omp/agent/models.db` (read-only), for a model's context window, and
+    the file names in `~/.omp/agent/extensions/` and a folder's `.mcp.json`,
+    to count plugins and MCP servers. omp's hooks are not read, so HOOKS
+    shows 0 for omp. Nothing under `~/.omp` with credentials is opened.
 
   From the same transcripts and rollouts it also picks up the messages agents send each
   other with `hc send`. Each one arrives as a line starting with
@@ -152,10 +169,15 @@ Your own layout stays as it is. Press `ctrl-shift-l` to switch back.
   `mods/agent-metrics/main.js`), not what a subscription bills. A model missing from the
   table is priced as its family's current model and shows with a `~`. Tokens are input +
   output + cache writes. `node scripts/test-cost.mjs` checks the math.
+- omp reports what each request cost with the provider it went through, so an omp
+  card's COST figure is that, not the table's list price (which is Anthropic's and
+  does not fit other providers' models), and it never shows a `~`.
 - Codex on a ChatGPT plan: its card shows the share of the plan's rate limit used
   in place of the token figure.
-- A terminal is paired only with a session of its own kind: Claude with
-  Claude, Codex with Codex. The kind comes from what the agent reports to Herdr.
+- A terminal is paired only with a session of its own kind and machine: Claude with
+  Claude, Codex with Codex, omp with omp. The kind comes from what the agent reports
+  to Herdr. An omp terminal is paired first by its foreground process: omp's session
+  names its own pid, and `hc get` reports the terminal's.
 - The panel shows each session's login email. Keep that in mind before you
   share a screenshot.
 - Message events only cover messages that reached a Claude Code or Codex agent

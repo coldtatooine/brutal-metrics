@@ -36,9 +36,10 @@ export const WARN = 0.6, HIGH = 0.8;
 export const windowOf = (ctx) => (ctx > 200_000 ? 1_000_000 : 200_000);
 // A session's window: Codex reports its own; Claude's is inferred from the context size.
 export const winOf = (s) => s?.window || windowOf(s?.ctx ?? 0);
-// Which agent a session or a terminal is: "claude", "codex", or null when the terminal doesn't say.
-export const kindOfApp = (app) => (/codex/i.test(app ?? "") ? "codex" : /claude/i.test(app ?? "") ? "claude" : null);
+// Which agent a session or a terminal is: "claude", "codex", "omp", or null when the terminal doesn't say.
+export const kindOfApp = (app) => (/codex/i.test(app ?? "") ? "codex" : /claude/i.test(app ?? "") ? "claude" : /\bomp\b/i.test(app ?? "") ? "omp" : null);
 export const isCodex = (s) => s?.agent === "codex";
+export const isOmp = (s) => s?.agent === "omp";
 
 export const fmt = (n) => (n >= 1e9 ? (n / 1e9).toFixed(1) + "B" : n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? Math.round(n / 1e3) + "k" : String(n));
 
@@ -99,17 +100,29 @@ export const age = (ms) => { const m = Math.floor(ms / 60000); return m < 1 ? "n
 export const normPath = (p) => (p ?? "").replaceAll("\\", "/").replace(/^\/\/wsl[.]localhost\/[^/]+/i, "").replace(/\/+$/, "").toLowerCase();
 
 // Pairs terminals with collector sessions. Pure: everything it needs about the terminals is passed in.
-//   sessions: the collector's list; list: [{ address, depth }]; created: address -> created_ms;
-//   titleOf(address): the terminal's title; folderOf(address): its normalized folder; kinds: address -> "claude" | "codex".
+//   sessions: the collector's list (a session has `machine`: the remote machine's name, "" or absent for this one);
+//   list: [{ address, depth }]; created: address -> created_ms;
+//   titleOf(address): the terminal's title; folderOf(address): its normalized folder; kinds: address -> "claude" | "codex" | "omp";
+//   pids: address -> the pid of the program in the terminal's foreground (omp reports its own pid, so that pairs exactly).
+// A terminal's machine is the part of its address before "/"; it only takes sessions collected on that machine.
 // Returns { address: session }.
-export function matchSessions(sessions, list, { created, titleOf, folderOf, kinds }) {
+export function matchSessions(sessions, list, { created, titleOf, folderOf, kinds, pids = {} }) {
   const out = {}, used = new Set();
-  // 0) Same title: Claude Code sets the terminal title to its session title (ai-title, or the /rename),
+  const machineOf = (addr) => (addr.includes("/") ? addr.slice(0, addr.indexOf("/")) : "");
+  // 0) Same process: omp's session says which omp process writes it, and the terminal says which program runs in it.
+  for (const a of list) {
+    const pid = pids[a.address];
+    if (!pid) continue;
+    const s = sessions.find((s) => !used.has(s.session) && s.pid === pid && s.agent === "omp" && (s.machine ?? "") === machineOf(a.address));
+    if (s) { out[a.address] = s; used.add(s.session); }
+  }
+  // 1) Same title: Claude Code sets the terminal title to its session title (ai-title, or the /rename),
   // which survives restarts and resumes, when terminal creation times say nothing. Sub-agents first, so
   // a parent whose title went stale and matches a sub-agent's falls through to the rules below.
-  const clean = (x) => (x ?? "").replace(/^[^\p{L}\p{N}]+/u, "").trim().toLowerCase();
-  // A Claude session never goes to a Codex terminal, nor the reverse; a terminal that reports no app takes either.
-  const fits = (addr, s) => !kinds[addr] || kinds[addr] === (s.agent ?? "claude");
+  // omp prefixes it with "π", a spinner or ">" and a space: "π ⠴ Fix the login form".
+  const clean = (x) => (x ?? "").replace(/^π\s+\S+\s+/u, "").replace(/^[^\p{L}\p{N}]+/u, "").trim().toLowerCase();
+  // A session never goes to a terminal of another agent kind or machine; a terminal that reports no app takes any kind.
+  const fits = (addr, s) => (!kinds[addr] || kinds[addr] === (s.agent ?? "claude")) && (s.machine ?? "") === machineOf(addr);
   // Codex titles its terminal "<thread name> | <folder>"; Claude Code uses the session title as is.
   const sameTitle = (term, sess) => Boolean(sess) && (term === sess || term.startsWith(sess + " | "));
   // Two sessions can share a title (two agents named after the same AGENTS.md). Pair title plus folder

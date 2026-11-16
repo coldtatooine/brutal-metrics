@@ -27,6 +27,13 @@ test("kindOfApp and isCodex", () => {
   assert.equal(M.isCodex({}), false);
 });
 
+test("kindOfApp knows omp, and isOmp reads the session", () => {
+  assert.equal(M.kindOfApp("omp"), "omp");
+  assert.equal(M.kindOfApp("oh-my-pi"), null);
+  assert.equal(M.isOmp({ agent: "omp" }), true);
+  assert.equal(M.isOmp({ agent: "codex" }), false);
+});
+
 test("account names", () => {
   assert.equal(M.acctName({ kind: "login", email: "a@b.c" }), "a@b.c");
   assert.equal(M.acctName({ kind: "env", label: "API KEY" }), "API KEY");
@@ -105,4 +112,41 @@ test("last resort: the newest unused session in the same folder", () => {
   ];
   const out = M.matchSessions(sessions, [{ address: "t1", depth: 0 }], ctx({ folderOf: () => "/p" }));
   assert.equal(out.t1.session, "new");
+});
+
+// ---- omp: pid, machine, title ----
+const omp = (over) => ({ agent: "omp", mtime: 1, started: 0, cwd: "/p", ...over });
+
+test("omp: the terminal's foreground pid pairs it with the session that process writes, whatever the titles say", () => {
+  const sessions = [omp({ session: "a", pid: 100, title: "Same" }), omp({ session: "b", pid: 200, title: "Same" })];
+  const list = [{ address: "t1", depth: 0 }, { address: "t2", depth: 0 }];
+  const out = M.matchSessions(sessions, list, ctx({ titleOf: () => "Same", folderOf: () => "/p", kinds: { t1: "omp", t2: "omp" }, pids: { t1: 200, t2: 100 } }));
+  assert.equal(out.t1.session, "b");
+  assert.equal(out.t2.session, "a");
+});
+
+test("omp: a pid from another machine never matches, even when the number is the same", () => {
+  const sessions = [omp({ session: "far", pid: 100, machine: "box" })];
+  const out = M.matchSessions(sessions, [{ address: "t1", depth: 0 }], ctx({ kinds: { t1: "omp" }, pids: { t1: 100 }, folderOf: () => "/p" }));
+  assert.deepEqual(out, {});
+});
+
+test("a terminal on a machine only takes that machine's sessions, in every rule", () => {
+  const sessions = [omp({ session: "here", title: "Fix", pid: 1 }), omp({ session: "box", title: "Fix", pid: 1, machine: "box" })];
+  const out = M.matchSessions(sessions, [{ address: "box/t3", depth: 0 }], ctx({ titleOf: () => "Fix", folderOf: () => "/p", kinds: { "box/t3": "omp" }, pids: { "box/t3": 1 } }));
+  assert.equal(out["box/t3"].session, "box");
+  const local = M.matchSessions(sessions, [{ address: "t3", depth: 0 }], ctx({ titleOf: () => "Fix", folderOf: () => "/p", kinds: { t3: "omp" } }));
+  assert.equal(local.t3.session, "here");
+});
+
+test("omp titles: the π, spinner and icon prefix of the terminal title is ignored", () => {
+  const sessions = [omp({ session: "a", title: "Fix the login form" })];
+  const out = M.matchSessions(sessions, [{ address: "t1", depth: 0 }], ctx({ titleOf: () => "π ⠴ ✨ Fix the login form", folderOf: () => "/p", kinds: { t1: "omp" } }));
+  assert.equal(out.t1.session, "a");
+});
+
+test("an omp session never goes to a Claude terminal", () => {
+  const sessions = [omp({ session: "a", title: "x", pid: 5 })];
+  const out = M.matchSessions(sessions, [{ address: "t1", depth: 0 }], ctx({ titleOf: () => "x", folderOf: () => "/p", kinds: { t1: "claude" } }));
+  assert.deepEqual(out, {});
 });

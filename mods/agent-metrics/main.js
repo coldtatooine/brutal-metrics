@@ -1,12 +1,13 @@
 // Per-agent usage metrics for the selected space: context, tokens, cache, and a blink
 // for agents that need a human (blocked) or are waiting on other agents.
-// Data: Claude Code transcripts and Codex rollouts, read in WSL by collect.py. Read-only; no network.
+// Data: Claude Code transcripts, Codex rollouts and omp sessions, read by collect.py here (in WSL on Windows) and,
+// through herdr-core, on every machine whose spaces are open. Read-only; no network.
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, HoverCard } from "gpui-base";
 import { avatar, animated } from "./avatar.js";
 import { SCOPE_KEY, SCOPES, normDir, inScope } from "./scope.js";
-import { HIGH, detailOf, detailRows, winOf, kindOfApp, isCodex, fmt, moneyOf, costTip, costOf, acctName, acctKey, turnOf, wslPath, turnsLeft, age, normPath, matchSessions } from "./model.js";
-import { spaces, agents, terminals, panes, focused, exec, hc, appHome, home, window, theme, run, shared, setShared, settings, props as blockProps, openOverlay, closeOverlay } from "herdr";
+import { HIGH, detailOf, detailRows, winOf, kindOfApp, isCodex, isOmp, fmt, moneyOf, costTip, costOf, acctName, acctKey, turnOf, wslPath, turnsLeft, age, normPath, matchSessions } from "./model.js";
+import { spaces, agents, terminals, panes, focused, exec, hc, machines, readTextFile, appHome, home, window, theme, run, shared, setShared, settings, props as blockProps, openOverlay, closeOverlay } from "herdr";
 
 // Feed for the Flow tab (agent-flow): the collector's message events, `to` resolved here by match().
 const FLOW_KEY = "flow.events", FLOW_HEARTBEAT_MS = 15000;
@@ -22,8 +23,12 @@ const REFRESH_MS = 5000;
 const AUTO_MS = 8000; // play: how long each tab stays before the next
 // Herdr stops an exec after 30s unless told otherwise, and a first read of many long transcripts can pass that.
 const COLLECT_MS = 120000;
+const REMOTE_MS = 30000; // a remote machine's collector run: python on the far side plus its first read of long transcripts
 const STUCK_MS = COLLECT_MS + 15000; // a collector run older than this is treated as hung
 const scriptPath = () => wslPath(appHome()) + "/mods/agent-metrics/collect.py";
+// Agent kind -> tag color and name: Claude's brand orange, a cool silver for Codex (the palette's #adc1cc), sage for omp.
+const KIND_COLOR = { claude: "#c9744f", codex: "#adc1cc", omp: "#8fae8b" };
+const KIND_NAME = { claude: "Claude Code", codex: "Codex", omp: "omp" };
 
 // Low-poly rainbow border for a working agent's card: flat rainbow facets, alternately lit and shaded,
 // stepping one facet per tick (the avatar's 200ms timer). An overlay: no size change, takes no clicks.
@@ -56,6 +61,11 @@ export default class AgentMetrics extends View {
     this.data = null;      // last collector output
     this.error = null;
     this.created = {};     // terminal address -> created_ms (never changes)
+    this.pids = {};        // omp terminal address -> pid of the program in its foreground (an omp session says its own pid)
+    this.remote = {};      // machine name -> its sessions, from collect.py run there
+    this.remoteBusy = {};  // machine name -> when its collector run started
+    this.remoteError = {}; // machine name -> why its last run failed, or null
+    this.src = null;       // collect.py's text, sent to other machines (they don't have the file)
     this.width = 300;
     this.busy = false;
     this.tick = 0; this.anim = false;
@@ -88,11 +98,15 @@ export default class AgentMetrics extends View {
       // cx.sleep is the runtime's timer (there is no setTimeout in a mod).
       const within = (p, ms) => Promise.race([p, cx.sleep(ms).then(() => { throw new Error("timeout"); })]);
       try {
-        for (const a of terminals().filter((x) => x.state === "live")) {
-          if (this.created[a.address]) continue;
-          try { this.created[a.address] = JSON.parse((await within(hc(["get", a.address, "--json"]), 10000)).stdout).created_ms ?? 0; }
-          catch (e) { this.created[a.address] = 0; }
-        }
+        // created_ms never changes; an omp agent's foreground pid does (omp quits, or starts in a shell later), so it is read each time.
+        const omps = new Set(agents().filter((x) => kindOfApp(x.app) === "omp").map((x) => x.address));
+        await Promise.all(terminals().filter((x) => x.state === "live" && (!this.created[x.address] || omps.has(x.address))).map(async (a) => {
+          try {
+            const t = JSON.parse((await within(hc(["get", a.address, "--json"]), 10000)).stdout);
+            this.created[a.address] = t.created_ms ?? 0;
+            if (omps.has(a.address)) this.pids[a.address] = t.foreground?.pid ?? 0;
+          } catch (e) { this.created[a.address] ??= 0; }
+        }));
         const win = window()?.platform === "windows";
         const r = await within(win
           ? exec("wsl.exe", ["-d", DISTRO, "python3", scriptPath(), wslPath(home()) + "/.claude"], { timeout: COLLECT_MS })
@@ -109,6 +123,31 @@ export default class AgentMetrics extends View {
         if (shared(FLOW_KEY)?.ok || shared(FLOW_KEY)?.error !== this.error) { this.flowSig = null; setShared(FLOW_KEY, { ok: false, at: Date.now(), error: this.error, events: [] }); }
       }
       if (run === this.run) this.busy = false;
+      cx.notify();
+      // Other machines run on their own clocks: one that is slow or down must not hold up this computer's numbers.
+      for (const m of machines()) if (m.name && m.layout === "ready") this.refreshRemote(cx, m.name);
+    });
+  }
+
+  // Runs collect.py on another machine through herdr-core and keeps its sessions apart from this computer's.
+  // Its message events are not used: the Flow tab follows this computer's agents.
+  refreshRemote(cx, name) {
+    if (this.remoteBusy[name] && Date.now() - this.remoteBusy[name] < REMOTE_MS + 5000) return;
+    this.remoteBusy[name] = Date.now();
+    cx.spawn(async (cx) => {
+      const within = (p, ms) => Promise.race([p, cx.sleep(ms).then(() => { throw new Error("timeout"); })]);
+      try {
+        this.src ??= await readTextFile(appHome() + "/mods/agent-metrics/collect.py");
+        if (!this.src) throw new Error("collect.py is missing");
+        const r = await within(exec("python3", ["-c", this.src], { on: name, timeout: REMOTE_MS }), REMOTE_MS + 2000);
+        if (r.code !== 0) throw new Error((r.stderr || "collector failed").split("\n").slice(-2).join(" "));
+        this.remote[name] = JSON.parse(r.stdout).sessions.map((s) => ({ ...s, machine: name }));
+        this.remoteError = { ...this.remoteError, [name]: null };
+        this.publishDetail();
+      } catch (e) {
+        this.remoteError = { ...this.remoteError, [name]: String(e?.message ?? e) };
+      }
+      this.remoteBusy[name] = 0;
       cx.notify();
     });
   }
@@ -152,6 +191,11 @@ export default class AgentMetrics extends View {
     setShared(FLOW_KEY, { ok: true, at: this.flowAt, orchestrator: null, events });
   }
 
+  // This computer's sessions, then every other machine's (each tagged with its machine name).
+  sessions() {
+    return [...(this.data?.sessions ?? []), ...Object.values(this.remote).flat()];
+  }
+
   // terminal address -> collector session (the rules live in model.js: matchSessions).
   match(list) {
     const cwds = Object.fromEntries(panes().map((p) => [p.terminal, p.cwd]));
@@ -160,14 +204,13 @@ export default class AgentMetrics extends View {
       || panes().find((p) => p.terminal === addr)?.title
       || terminals().find((x) => x.address === addr)?.title;
     const folderOf = (addr) => normPath(cwds[addr] ?? terminals().find((x) => x.address === addr)?.cwd);
-    return matchSessions(this.data?.sessions ?? [], list, { created: this.created, titleOf, folderOf, kinds });
+    const pids = Object.fromEntries(Object.entries(this.pids).filter(([, p]) => p));
+    return matchSessions(this.sessions(), list, { created: this.created, titleOf, folderOf, kinds, pids });
   }
 
   // Brutalist summary: big mono numbers, thick borders, solid blocks. Turns red and blinks when someone is needed.
   hero(t, { space, rows, loading, tips, headline, totalTok, totalUsd, totalEst, cachePct, ctxPct, cfg, needs, waiting, accounts }) {
     const MONO = "JetBrains Mono";
-    // Agent-kind tag: Claude's brand orange, muted; a cool light silver for Codex (the palette's #adc1cc).
-    const KIND_CLAUDE = "#c9744f", KIND_CODEX = "#adc1cc";
     const ACCT = "#7f8f9a"; // account tag: a cool, dim slate between the palette's #7a8076 and #95a7a7
     const hot = needs > 0;
     // Palette grays from the reference still; rust (#95553a) when someone is needed.
@@ -272,7 +315,7 @@ export default class AgentMetrics extends View {
     return v_flex().id("detail-root").size_full().bg(t.surface).p(16).gap(10)
       .child(h_flex().items_center().gap(8)
         .child(div().flex_1().min_w(0).truncate().text_size(16).font_family(MONO).font_black().text_color(t.foreground).child(name))
-        .when(Boolean(d), (el) => el.child(div().flex_none().text_size(10).font_family(MONO).font_bold().text_color(d.kind === "codex" ? "#adc1cc" : "#c9744f").child(String(d.kind).toUpperCase())))
+        .when(Boolean(d), (el) => el.child(div().flex_none().text_size(10).font_family(MONO).font_bold().text_color(KIND_COLOR[d.kind] ?? KIND_COLOR.claude).child(String(d.kind).toUpperCase())))
         .child(div().flex_none().px(6).h(18).flex().items_center().text_size(10.5).font_family(MONO).font_black().border(2).border_color(c).text_color(c).child(String(status).toUpperCase())))
       .when(Boolean(d?.title), (el) => el.child(div().truncate().text_size(11).font_family(MONO).text_color(t.muted).child(d.title)))
       .when(!d, (el) => el.child(div().text_size(12).font_family(MONO).text_color(t.dim).child("No collector data for this agent yet.")))
@@ -331,7 +374,10 @@ export default class AgentMetrics extends View {
       const u = this.view === "turn" ? turnOf(s) : s;
       const kind = s?.agent ?? kindOfApp(agents().find((x) => x.address === a.address)?.app);
       // Cost only in the COST tab. Codex runs on a ChatGPT plan: no price table applies (its card shows plan use).
-      const { usd, estimated: est } = this.view === "cost" && s && !isCodex(s) ? costOf(s.by_model) : { usd: 0, estimated: false };
+      // omp reports what each request cost with the provider it went through, so that is the figure (the table's
+      // prices would be Anthropic's for every model).
+      const { usd, estimated: est } = this.view !== "cost" || !s || isCodex(s) ? { usd: 0, estimated: false }
+        : isOmp(s) ? { usd: s.cost_usd ?? 0, estimated: false } : costOf(s.by_model);
       return { a, name: a.name, kids, state, s, u, usd, est, kind };
     });
 
@@ -362,8 +408,6 @@ export default class AgentMetrics extends View {
     const color = { blocked: t.blocked, waiting: t.accent, working: t.working, done: t.done, idle: t.dim };
     // Brutalist rows: square blocks, 2px borders, mono caps, a solid status stamp, a chunky segmented bar.
     const MONO = "JetBrains Mono";
-    // Agent-kind tag: Claude's brand orange, muted; a cool light silver for Codex (the palette's #adc1cc).
-    const KIND_CLAUDE = "#c9744f", KIND_CODEX = "#adc1cc";
     const ACCT = "#7f8f9a"; // account tag: a cool, dim slate between the palette's #7a8076 and #95a7a7
     const label = (r) => r.state === "blocked" ? "NEEDS YOU"
       : r.state === "waiting" ? `WAITING ${r.kids.length}`
@@ -447,8 +491,8 @@ export default class AgentMetrics extends View {
           // which agent this is: CLAUDE or CODEX, small and dim, just above the terminal code;
           // nothing when neither the session nor the terminal says
           .when(Boolean(r.kind), (el) => el.child(div().id(`kind-${r.a.address}`).flex_none()
-            .text_size(r.a.depth > 0 ? 7.5 : 8).font_family(MONO).font_bold().text_color(r.kind === "codex" ? KIND_CODEX : KIND_CLAUDE)
-            .tooltip(r.kind === "codex" ? `Codex${s?.model ? " · " + s.model : ""}` : `Claude Code${s?.model ? " · " + s.model : ""}`)
+            .text_size(r.a.depth > 0 ? 7.5 : 8).font_family(MONO).font_bold().text_color(KIND_COLOR[r.kind] ?? KIND_COLOR.claude)
+            .tooltip(`${KIND_NAME[r.kind] ?? r.kind}${s?.model ? " · " + s.model : ""}${s?.machine ? " · " + s.machine : ""}`)
             .child(r.kind.toUpperCase())))
           // terminal code (hc address), pinned to the bottom of the avatar column
           // click: open (focus) this agent's terminal; sub-agents without a pane get one
